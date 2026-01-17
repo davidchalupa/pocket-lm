@@ -8,6 +8,7 @@ and then replaces that with:
 import os
 import re
 import textwrap
+import contextlib
 from llama_cpp import Llama
 
 # ---------- Config ----------
@@ -28,9 +29,12 @@ SYSTEM_PROMPT = (
 # regexes for sanitization / trimming
 _SPEAKER_RE = re.compile(r'(^|\n)\s*(user|you|human|client|visitor)\b[:\s]', flags=re.IGNORECASE)
 _ASSISTANT_LABEL_RE = re.compile(r'^\s*(assistant|ai|bot)[:\-\s]*', flags=re.IGNORECASE)
+_ID_LINE_RE = re.compile(r'^\s*(cmpl-[A-Za-z0-9\-]+|[A-Za-z0-9]{8,}|[A-Za-z0-9\-]{10,})\s*$', flags=re.IGNORECASE)
 
 def sanitize_assistant_text(text, last_user_message=None):
-    """Trim speaker labels and remove verbatim repeats of the user's message."""
+    """Trim speaker labels and remove verbatim repeats of the user's message.
+    Also remove single-line id-like tokens (e.g. 'cmpl-...') that are not helpful.
+    """
     if not text:
         return ""
 
@@ -50,23 +54,34 @@ def sanitize_assistant_text(text, last_user_message=None):
             if len(u) >= 4:
                 text = re.sub(re.escape(u), '', text, flags=re.IGNORECASE).strip()
 
+    # Remove single-line id-like outputs (e.g., cmpl-..., or short alphanum tokens)
+    # If whole reply is just an id-like token, return empty string
+    lines = [ln for ln in text.splitlines() if ln.strip() != ""]
+    if len(lines) == 1 and _ID_LINE_RE.match(lines[0]):
+        return ""
+
+    # Also remove any id-like lines embedded inside the reply
+    filtered_lines = [ln for ln in lines if not _ID_LINE_RE.match(ln)]
+    text = "\n".join(filtered_lines).strip()
+
     # Normalize whitespace
     text = re.sub(r'\r\n', '\n', text)
     text = re.sub(r'\n\s*\n+', '\n\n', text)
     text = re.sub(r'[ \t]{2,}', ' ', text)
     return text.strip()
 
-# instantiate the local model
 print("Loading local LLM (llama.cpp backend)...")
-llm = Llama(model_path=MODEL_PATH)
+# instantiate the local model while suppressing stderr from the native backend
+with open(os.devnull, "w") as devnull:
+    with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+        llm = Llama(model_path=MODEL_PATH)
 
 def generate_text(llm, prompt, max_tokens=150):
     """
-    Collect generation into a string (no printing).
-    Tries high-level create_completion/create first (streaming allowed but we collect), then low-level fallback.
-    Returns raw generated text (possibly trimmed early if model emits a user-like label).
+    Same behavior as before, but suppresses native-backend stdout (and stderr)
+    during llama-cpp calls and iteration so backend lines like
+    "Llama.generate: 92 prefix-match hit..." are not printed.
     """
-    # helper to look for user-like labels in generated text
     stop_re = re.compile(r'(^|\n)\s*(user|you|human|client|visitor)\b[:\s]', flags=re.IGNORECASE)
     def _stop_index_in(text):
         m = stop_re.search(text)
@@ -76,41 +91,52 @@ def generate_text(llm, prompt, max_tokens=150):
         parts = []
         buffer = ""
         try:
-            for chunk in resp_iter:
-                s = ""
-                if isinstance(chunk, dict):
-                    choices = chunk.get("choices") if hasattr(chunk, "get") else None
-                    if choices:
-                        first = choices[0] if choices else None
-                        if isinstance(first, dict):
-                            delta = first.get("delta") or {}
-                            s = delta.get("content") or delta.get("text") or ""
-                            if not s:
-                                s = first.get("text") or ""
-                            if not s:
-                                msg = first.get("message")
-                                if isinstance(msg, dict):
-                                    s = msg.get("content") or msg.get("text") or ""
+            # iterate while suppressing native stdout/stderr
+            with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                for chunk in resp_iter:
+                    s = ""
+                    if isinstance(chunk, dict):
+                        choices = chunk.get("choices") if hasattr(chunk, "get") else None
+                        if choices:
+                            first = choices[0] if choices else None
+                            if isinstance(first, dict):
+                                delta = first.get("delta") or {}
+                                s = delta.get("content") or delta.get("text") or ""
+                                if not s:
+                                    s = first.get("text") or ""
+                                if not s:
+                                    msg = first.get("message")
+                                    if isinstance(msg, dict):
+                                        s = msg.get("content") or msg.get("text") or ""
+                        if not s:
+                            # safer fallback: iterate items, skip metadata keys that often contain ids
+                            _metadata_blacklist = {"id", "object", "model", "created", "type", "hash"}
+
+                            for k, v in chunk.items():
+                                if not isinstance(k, str):
+                                    continue
+                                kl = k.lower()
+                                if kl in _metadata_blacklist:
+                                    continue
+                                if isinstance(v, str) and v.strip():
+                                    s = v
+                                    break
+                    elif isinstance(chunk, (str, bytes)):
+                        s = chunk.decode("utf-8", errors="ignore") if isinstance(chunk, bytes) else chunk
+                    else:
+                        s = str(chunk)
+
                     if not s:
-                        for v in chunk.values():
-                            if isinstance(v, str) and v.strip():
-                                s = v
-                                break
-                elif isinstance(chunk, (str, bytes)):
-                    s = chunk.decode("utf-8", errors="ignore") if isinstance(chunk, bytes) else chunk
-                else:
-                    s = str(chunk)
+                        continue
 
-                if not s:
-                    continue
-
-                combined = buffer + s
-                stop_idx = _stop_index_in(combined)
-                if stop_idx != -1:
-                    return (combined[:stop_idx]).strip()
-                parts.append(s)
-                buffer += s
+                    combined = buffer + s
+                    stop_idx = _stop_index_in(combined)
+                    if stop_idx != -1:
+                        return (combined[:stop_idx]).strip()
+                    parts.append(s)
+                    buffer += s
         except Exception:
+            # fall back to whatever was collected
             pass
         return "".join(parts).strip()
 
@@ -118,7 +144,8 @@ def generate_text(llm, prompt, max_tokens=150):
     try:
         if hasattr(llm, "create_completion"):
             try:
-                resp = llm.create_completion(prompt=prompt, max_tokens=max_tokens, stream=True)
+                with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    resp = llm.create_completion(prompt=prompt, max_tokens=max_tokens, stream=True)
                 if hasattr(resp, "__iter__") and not isinstance(resp, dict):
                     return _consume_iterable(resp)
                 if isinstance(resp, dict):
@@ -140,7 +167,8 @@ def generate_text(llm, prompt, max_tokens=150):
     try:
         if hasattr(llm, "create"):
             try:
-                resp = llm.create(prompt=prompt, max_tokens=max_tokens, stream=True)
+                with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    resp = llm.create(prompt=prompt, max_tokens=max_tokens, stream=True)
                 if hasattr(resp, "__iter__") and not isinstance(resp, dict):
                     return _consume_iterable(resp)
             except TypeError:
@@ -148,7 +176,8 @@ def generate_text(llm, prompt, max_tokens=150):
             except Exception:
                 pass
             try:
-                resp = llm.create(prompt=prompt, max_tokens=max_tokens)
+                with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    resp = llm.create(prompt=prompt, max_tokens=max_tokens)
                 if isinstance(resp, dict):
                     choices = resp.get("choices") or []
                     if choices and isinstance(choices[0], dict):
@@ -165,7 +194,8 @@ def generate_text(llm, prompt, max_tokens=150):
     try:
         if hasattr(llm, "create_completion"):
             try:
-                resp = llm.create_completion(prompt=prompt, max_tokens=max_tokens, stream=False)
+                with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    resp = llm.create_completion(prompt=prompt, max_tokens=max_tokens, stream=False)
                 if isinstance(resp, dict):
                     choices = resp.get("choices") or []
                     if choices:
@@ -187,20 +217,21 @@ def generate_text(llm, prompt, max_tokens=150):
                 toks_in = llm.tokenize(prompt_bytes)
                 parts = []
                 buffer = ""
-                for t in llm.generate(toks_in, max_tokens=max_tokens):
-                    # if token is int, collect; otherwise try to coerce to string
-                    if isinstance(t, int):
-                        parts.append(t)
-                    else:
-                        # unusual shape: try to decode/coerce and return
-                        if isinstance(t, (bytes, bytearray)):
-                            s = t.decode("utf-8", errors="ignore")
+                # iterate while suppressing native stdout/stderr
+                with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    for t in llm.generate(toks_in, max_tokens=max_tokens):
+                        # if token is int, collect; otherwise try to coerce to string
+                        if isinstance(t, int):
+                            parts.append(t)
                         else:
-                            s = str(t)
-                        buffer += s
-                        stop = _stop_index_in(buffer)
-                        if stop != -1:
-                            return buffer[:stop].strip()
+                            if isinstance(t, (bytes, bytearray)):
+                                s = t.decode("utf-8", errors="ignore")
+                            else:
+                                s = str(t)
+                            buffer += s
+                            stop = _stop_index_in(buffer)
+                            if stop != -1:
+                                return buffer[:stop].strip()
                 if parts:
                     try:
                         detok = llm.detokenize(parts)
@@ -210,7 +241,6 @@ def generate_text(llm, prompt, max_tokens=150):
                         stop = _stop_index_in(text)
                         return text[:stop].strip() if stop != -1 else text
                     except Exception:
-                        # best effort: detokenize in small chunks
                         out = []
                         for tok in parts:
                             try:
@@ -223,7 +253,6 @@ def generate_text(llm, prompt, max_tokens=150):
                         text = "".join(out).strip()
                         stop = _stop_index_in(text)
                         return text[:stop].strip() if stop != -1 else text
-                # if nothing else, use buffer
                 stop = _stop_index_in(buffer)
                 return buffer[:stop].strip() if stop != -1 else buffer.strip()
             except Exception:
@@ -244,6 +273,7 @@ def generate_text(llm, prompt, max_tokens=150):
         pass
 
     raise RuntimeError("No compatible generation API found on the Llama object or generation failed.")
+
 
 def build_prompt(history, user_message):
     """Build simple conversation prompt with HISTORY_TURNS. Labels: Human / Assistant."""
