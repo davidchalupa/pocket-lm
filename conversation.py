@@ -1,5 +1,5 @@
 """
-Minimal local LLM chat (no RAG) that displays:
+Minimal local LLM chat that displays:
   Assistant: ...      (while model is generating)
 and then replaces that with:
   Assistant: <reply>
@@ -11,14 +11,16 @@ import textwrap
 import contextlib
 from llama_cpp import Llama
 
-# ---------- Config ----------
+
+# config
 MODEL_PATH = "models/rocket-3b.Q4_K_M.gguf"  # <- update to your model file
 MAX_TOKENS = 150
-HISTORY_TURNS = 6   # how many past user+assistant turns to include
-# ----------------------------
+HISTORY_TURNS = 6   # how many past user + assistant turns to include
+
 
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model file not found at '{MODEL_PATH}'. Update MODEL_PATH accordingly.")
+
 
 SYSTEM_PROMPT = (
     "You are a helpful, concise assistant. Answer the user's questions directly and politely.\n\n"
@@ -26,10 +28,12 @@ SYSTEM_PROMPT = (
     "Do NOT produce 'User:', 'You:', or simulate the user's messages. Stop after the assistant's reply."
 )
 
+
 # regexes for sanitization / trimming
 _SPEAKER_RE = re.compile(r'(^|\n)\s*(user|you|human|client|visitor)\b[:\s]', flags=re.IGNORECASE)
 _ASSISTANT_LABEL_RE = re.compile(r'^\s*(assistant|ai|bot)[:\-\s]*', flags=re.IGNORECASE)
 _ID_LINE_RE = re.compile(r'^\s*(cmpl-[A-Za-z0-9\-]+|[A-Za-z0-9]{8,}|[A-Za-z0-9\-]{10,})\s*$', flags=re.IGNORECASE)
+
 
 def sanitize_assistant_text(text, last_user_message=None):
     """Trim speaker labels and remove verbatim repeats of the user's message.
@@ -70,11 +74,13 @@ def sanitize_assistant_text(text, last_user_message=None):
     text = re.sub(r'[ \t]{2,}', ' ', text)
     return text.strip()
 
+
 print("Loading local LLM (llama.cpp backend)...")
-# instantiate the local model while suppressing stderr from the native backend
+# instantiate the local model while suppressing stdout/stderr from the native backend
 with open(os.devnull, "w") as devnull:
     with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
         llm = Llama(model_path=MODEL_PATH)
+
 
 def generate_text(llm, prompt, max_tokens=150):
     """
@@ -83,6 +89,7 @@ def generate_text(llm, prompt, max_tokens=150):
     "Llama.generate: 92 prefix-match hit..." are not printed.
     """
     stop_re = re.compile(r'(^|\n)\s*(user|you|human|client|visitor)\b[:\s]', flags=re.IGNORECASE)
+
     def _stop_index_in(text):
         m = stop_re.search(text)
         return m.start() if m else -1
@@ -111,7 +118,6 @@ def generate_text(llm, prompt, max_tokens=150):
                         if not s:
                             # safer fallback: iterate items, skip metadata keys that often contain ids
                             _metadata_blacklist = {"id", "object", "model", "created", "type", "hash"}
-
                             for k, v in chunk.items():
                                 if not isinstance(k, str):
                                     continue
@@ -275,6 +281,67 @@ def generate_text(llm, prompt, max_tokens=150):
     raise RuntimeError("No compatible generation API found on the Llama object or generation failed.")
 
 
+def generate_with_auto_extend(llm, prompt, last_user_message=None,
+                              initial_max_tokens=MAX_TOKENS, max_attempts=3, increment=150):
+    """
+    Attempts to get a *sanitized* non-empty assistant reply. Retries with larger
+    token budgets if the sanitized reply is empty or the raw output looks like an id-only result.
+
+    Returns the sanitized assistant reply (string). If all attempts fail, returns an empty string.
+    """
+    max_tokens = initial_max_tokens
+    last_raw = ""
+    for attempt in range(1, max_attempts + 1):
+        # generate raw output (uses your robust generate_text)
+        raw = generate_text(llm, prompt, max_tokens=max_tokens)
+        last_raw = raw or ""
+
+        # sanitize it (same sanitizer you already have)
+        sanitized = sanitize_assistant_text(last_raw, last_user_message)
+
+        # If sanitized reply is non-empty, accept it
+        if sanitized:
+            return sanitized
+
+        # If sanitized empty, decide to retry based on heuristics:
+        # - raw is empty
+        # - raw is id-like (single-line cmpl-...)
+        # - raw ends with ellipses suggesting truncation
+        raw_str = (last_raw or "").strip()
+        is_id_like = False
+        if raw_str:
+            lines = [ln for ln in raw_str.splitlines() if ln.strip() != ""]
+            if len(lines) == 1 and _ID_LINE_RE.match(lines[0]):
+                is_id_like = True
+
+        looks_truncated = raw_str.endswith("...") or raw_str.endswith("..")
+
+        if attempt < max_attempts and (not raw_str or is_id_like or looks_truncated):
+            # increase budget and retry
+            max_tokens += increment
+            # update UX: inform user minimally by replacing the "Assistant: ..." line
+            print("\r" + " " * 80 + "\r", end="", flush=True)
+            print(f"Assistant: ... (retrying with token budget {max_tokens})", end="", flush=True)
+            continue
+
+        # If we reach here, either last attempt or heuristics didn't suggest retry.
+        # Do one final conservative forced attempt with an explicit short-answer instruction
+        forced_prompt = prompt + "\n\nAssistant: Please answer in one short sentence. If you don't know, reply exactly 'I don't know'."
+        try:
+            raw_forced = generate_text(llm, forced_prompt, max_tokens=max_tokens + increment)
+            sanitized_forced = sanitize_assistant_text(raw_forced, last_user_message)
+            if sanitized_forced:
+                return sanitized_forced
+        except Exception:
+            pass
+
+        # If still empty, break and return empty (caller will show fallback)
+        break
+
+    # final fallback: empty string
+    return ""
+
+
 def build_prompt(history, user_message):
     """Build simple conversation prompt with HISTORY_TURNS. Labels: Human / Assistant."""
     lines = [SYSTEM_PROMPT, "", "Conversation:"]
@@ -287,6 +354,7 @@ def build_prompt(history, user_message):
     lines.append(f"Human: {user_message.strip()}")
     lines.append("Assistant:")
     return "\n".join(lines)
+
 
 def chat_loop():
     print("\n=== Minimal Local Chat ===")
@@ -307,11 +375,9 @@ def chat_loop():
             display_prefix = "Assistant: ..."
             print(display_prefix, end='', flush=True)
 
-            # Generate (blocking) and collect raw text
-            raw = generate_text(llm, prompt, max_tokens=MAX_TOKENS)
-
-            # Sanitize the assistant reply
-            reply = sanitize_assistant_text(raw, last_user_message=user_input)
+            # Generate (blocking) and get a sanitized reply (auto-retries if needed)
+            reply = generate_with_auto_extend(llm, prompt, last_user_message=user_input,
+                                              initial_max_tokens=MAX_TOKENS, max_attempts=3, increment=150)
             if not reply:
                 reply = "(no assistant reply produced)"
 
@@ -328,6 +394,7 @@ def chat_loop():
             history.append({"role": "assistant", "text": reply})
     except KeyboardInterrupt:
         print("\nInterrupted. Bye.")
+
 
 if __name__ == "__main__":
     chat_loop()
