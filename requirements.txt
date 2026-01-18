@@ -5,3 +5,4 @@ llama-cpp-python>=0.1.0             # python bindings for llama.cpp (local LLM i
 numpy>=1.23.0
 huggingface_hub
 tqdm
+pypdf2
