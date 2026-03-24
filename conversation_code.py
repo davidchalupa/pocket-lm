@@ -1,28 +1,51 @@
 import sys
+import os
 from llama_cpp import Llama
 
-# 1. Configuration
-MODEL_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
+# 1. Configuration - Define both paths
+MINISTRAL_PATH = "models/Ministral-8B-Instruct-2410-Q4_K_M.gguf"
 CONTEXT_WINDOW = 4096  # How much text (prompt + code + history) it can remember at once
 
-print(f"Loading model into RAM from {MODEL_PATH}...")
-print("This might take a few seconds...\n")
+# 2. Initialization with Fallback Logic
+llm = None
+loaded_model_name = ""
 
-# 2. Initialize the Model
-# n_ctx sets the context window. 4096 is a good balance for CPU memory.
-llm = Llama(
-    model_path=MODEL_PATH,
-    n_ctx=CONTEXT_WINDOW,
-    verbose=False  # Set to True if you want to see detailed memory/CPU usage stats
-)
+use_qwen = False
+
+# Attempt Primary: Ministral 8B
+if not use_qwen:
+    print(f"Loading model at {MINISTRAL_PATH} into RAM...")
+    try:
+        llm = Llama(
+            model_path=MINISTRAL_PATH,
+            n_ctx=CONTEXT_WINDOW,
+            verbose=False
+        )
+        loaded_model_name = "Ministral 8B"
+    except Exception as e:
+        print(f"⚠️ Failed to load Ministral: {e}")
+        print("Falling back to secondary model...")
+else:
+    QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
+    if llm is None:
+        if os.path.exists(QWEN_PATH):
+            print(f"Loading model at {QWEN_PATH} into RAM...")
+            try:
+                llm = Llama(
+                    model_path=QWEN_PATH,
+                    n_ctx=CONTEXT_WINDOW,
+                    verbose=False
+                )
+                loaded_model_name = "Qwen 2.5 Coder 7B"
+            except Exception as e:
+                print(f"❌ Failed to load Qwen: {e}")
+                sys.exit(1)
+        else:
+            print("❌ Error: Neither Ministral nor Qwen model files could be loaded.")
+            print("Please check your 'models/' directory.")
+            sys.exit(1)
 
 # 3. Setup Chat History with a System Prompt
-# messages = [
-#     {
-#         "role": "system",
-#         "content": "You are a helpful, brilliant software engineering assistant. Provide clear, concise explanations and output well-formatted code."
-#     }
-# ]
 messages = [
     {
         "role": "system",
@@ -36,8 +59,8 @@ messages = [
     }
 ]
 
-print("=" * 50)
-print("🤖 Local Qwen 2.5 Coder CLI Initialized")
+print("\n" + "=" * 50)
+print(f"🤖 Local CLI Initialized: Running [{loaded_model_name}]")
 print("Instructions:")
 print("- Type or paste your prompt and code.")
 print("- Type '/send' on a new, empty line to submit.")
@@ -72,7 +95,7 @@ while True:
     # Add user message to history
     messages.append({"role": "user", "content": user_input})
 
-    print("\n[Assistant]: ", end="", flush=True)
+    print(f"\n[Assistant - {loaded_model_name}]: ", end="", flush=True)
 
     # 5. Generate Response (Streaming)
     # We stream the output so you don't have to wait for the whole answer to generate
@@ -83,7 +106,7 @@ while True:
         stream = llm.create_chat_completion(
             messages=messages,
             stream=True,
-            temperature=0.3  # Lower temperature = more precise/less creative code
+            temperature=0.3  # Lower temperature = more precise code
         )
 
         for chunk in stream:
@@ -98,5 +121,5 @@ while True:
 
     print()  # Print final newline
 
-    # Add assistant response to history to maintain context for the next question
+    # Add assistant response to history to maintain context
     messages.append({"role": "assistant", "content": response_content})
