@@ -10,13 +10,13 @@ from llama_cpp import Llama
 QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
 CONTEXT_WINDOW = 4096
 target_path = QWEN_PATH
-loaded_model_name = "Qwen 2.5 Coder 7B (Agent Mode V6 Final)"
+loaded_model_name = "Qwen 2.5 Coder 7B (Agent Mode V8 Clean)"
 
 
 # 2. Tool Definitions
 def read_file(filepath):
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             return f.read()
     except Exception as e:
         return f"Error reading file: {e}"
@@ -25,7 +25,7 @@ def read_file(filepath):
 def write_file(filepath, content):
     try:
         os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) else None
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         return f"Successfully wrote to {filepath}"
     except Exception as e:
@@ -43,7 +43,32 @@ def run_cmd(command):
         return f"Error executing command: {e}"
 
 
-# 3. Native File Handlers (Bypasses LLM hallucinations)
+# --- NATIVE MAPPER: /readme ---
+def get_repo_structure(startpath, max_depth=3):
+    """Natively builds a tree of the repo, skipping heavy/irrelevant folders."""
+    ignore_dirs = {'.git', '.venv', 'venv', 'env', 'node_modules', '__pycache__', '.idea', '.vscode', 'dist', 'build'}
+    tree_str = ""
+    start_sep = startpath.count(os.path.sep)
+
+    for root, dirs, files in os.walk(startpath):
+        dirs[:] = [d for d in dirs if d not in ignore_dirs]  # Filter in-place
+        depth = root.count(os.path.sep) - start_sep
+
+        if depth > max_depth:
+            del dirs[:]  # Stop traversing deeper
+            continue
+
+        indent = ' ' * 4 * depth
+        tree_str += f"{indent}{os.path.basename(root)}/\n"
+        subindent = ' ' * 4 * (depth + 1)
+        for f in files:
+            if not f.startswith('.'):  # Ignore hidden files
+                tree_str += f"{subindent}{f}\n"
+
+    return tree_str[:1500]  # Truncate to protect context window
+
+
+# --- NATIVE HANDLER: /requirements ---
 def generate_requirements_native(target_dir):
     try:
         # Force absolute path resolution
@@ -86,8 +111,11 @@ def generate_requirements_native(target_dir):
             return f"Error: Pip execution failed. Stderr: {result.stderr}"
 
         raw_packages = result.stdout.strip()
+
+        # --- Empty Package Fix ---
         if not raw_packages:
-            return f"Warning: Virtual env found, but it contains 0 installed packages. No file written."
+            print("\n   [Notice] The virtual environment has 0 packages installed.")
+            raw_packages = "# No dependencies found. The virtual environment is empty."
 
         # Write to the absolute destination path
         with open(final_output_path, 'w', encoding='utf-8') as f:
@@ -104,11 +132,7 @@ if os.path.exists(target_path):
     print(f"Loading {loaded_model_name} into RAM...")
     try:
         llm = Llama(
-            model_path=target_path,
-            n_ctx=CONTEXT_WINDOW,
-            n_threads=6,
-            n_batch=512,
-            verbose=False
+            model_path=target_path, n_ctx=CONTEXT_WINDOW, n_threads=6, n_batch=512, verbose=False
         )
     except Exception as e:
         print(f"❌ Failed to load: {e}")
@@ -145,8 +169,8 @@ messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 print("\n" + "=" * 60)
 print(f"🤖 Local Agent Initialized: [{loaded_model_name}]")
 print("Shortcuts:")
-print("  /requirements                -> Generate requirements.txt for current directory")
-print("  /requirements <path_to_repo> -> Generate requirements.txt for a specific repository path")
+print("  /requirements [path] -> Safely generates requirements.txt natively")
+print("  /readme [path]       -> Explores repo and creates/updates README.md")
 print("Commands: Type /send to submit, /quit to exit, /clear to wipe memory.")
 print("=" * 60)
 
@@ -176,12 +200,12 @@ while True:
     if not user_input:
         continue
 
-    # --- THE CRITICAL FIX: Direct Native Interception ---
+    # --- MACRO: /requirements (Restored V6 Native Engine) ---
     if user_input.startswith("/requirements"):
         parts = user_input.split(" ", 1)
         target_dir = parts[1].strip() if len(parts) > 1 else "."
-
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
+
         print(f"\n[DEBUG] Resolving Destination: '{abs_target_dir}'")
 
         if not os.path.isdir(abs_target_dir):
@@ -193,20 +217,53 @@ while True:
         approval = input("Allow this action? (y/n): ").strip().lower()
 
         if approval == 'y':
-            # Execute the function completely outside of the LLM context
             tool_result = generate_requirements_native(abs_target_dir)
             print(f"⚙️  Tool execution finished.")
             print(f"🤖 Backend Hook Log: {tool_result}")
-
-            # Inform the model that the task is finished so it stays in sync
             messages.append({"role": "user",
                              "content": f"System Alert: The user manually executed the /requirements macro for '{abs_target_dir}'. Result: {tool_result}. Briefly acknowledge that the task is complete."})
         else:
             print("🛑 Action blocked.")
             continue
 
+    # --- MACRO: /readme (Hybrid Mode) ---
+    # ToDo: some smart reading of only certain lines in a file might be needed here,
+    # generation of README can take long
+    elif user_input.startswith("/readme"):
+        parts = user_input.split(" ", 1)
+        target_dir = parts[1].strip() if len(parts) > 1 else "."
+        abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
+
+        print(f"\n[DEBUG] Resolving Destination: '{abs_target_dir}'")
+
+        if not os.path.isdir(abs_target_dir):
+            print(f"❌ Error: Target directory '{abs_target_dir}' does not exist.")
+            continue
+
+        print(f"\n🔍 Pre-computing repository structure for {abs_target_dir}...")
+        repo_tree = get_repo_structure(abs_target_dir)
+
+        readme_path = os.path.join(abs_target_dir, "README.md")
+        if os.path.exists(readme_path):
+            existing_readme = read_file(readme_path)
+            print("   [Notice] Existing README.md found. The Agent will attempt to update it.")
+        else:
+            existing_readme = "No existing README.md found. You must create one from scratch."
+            print("   [Notice] No README.md found. The Agent will draft a new one.")
+
+        hidden_prompt = (
+            f"The user wants to write or update a `README.md` for the repository located at '{abs_target_dir}'.\n\n"
+            f"--- REPOSITORY STRUCTURE ---\n{repo_tree}\n--------------------------\n\n"
+            f"--- EXISTING README.MD ---\n{existing_readme}\n--------------------------\n\n"
+            f"YOUR TASK:\n"
+            f"1. Review the repository structure. Use the `read_file` tool to read 1 to 3 key source files (e.g., main.py, core logic) to understand the project deeply.\n"
+            f"2. Once you comprehend the code, use the `write_file` tool to save a detailed, professional README.md exactly to '{readme_path}'.\n"
+            f"3. If updating an existing README, preserve important original info but enhance the structure and descriptions."
+        )
+        messages.append({"role": "user", "content": hidden_prompt})
+
     else:
-        # Standard free-text conversation passes through to the LLM normally
+        # Standard free-text conversation passes through
         messages.append({"role": "user", "content": user_input})
 
     # Internal Agent Execution Loop
@@ -216,10 +273,7 @@ while True:
 
         try:
             stream = llm.create_chat_completion(
-                messages=messages,
-                stream=True,
-                temperature=0.1,
-                stop=["</tool_call>"]
+                messages=messages, stream=True, temperature=0.1, stop=["</tool_call>"]
             )
 
             for chunk in stream:
@@ -255,7 +309,8 @@ while True:
                     print(f"\n⚠️  AGENT REQUESTS PERMISSION TO EXECUTE: {tool_name}")
                     if tool_name == "write_file":
                         print(f"File: {tool_args.get('filepath')}")
-                        print("Content Snippet: [Context preview]")
+                        print("Content Snippet: \n" + "-" * 20)
+                        print(tool_args.get('content', '')[:400] + "\n...[truncated]\n" + "-" * 20)
                     else:
                         print(f"Arguments: {tool_args}")
 
@@ -284,7 +339,7 @@ while True:
                     continue
 
                 except json.JSONDecodeError:
-                    error_msg = "Error: Invalid JSON format. Please ensure strict JSON formatting."
+                    error_msg = "Error: Invalid JSON format. Ensure strict JSON formatting."
                     print(f"❌ {error_msg}")
                     messages.append({"role": "user", "content": error_msg})
                     continue
