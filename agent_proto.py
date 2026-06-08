@@ -8,16 +8,33 @@ from llama_cpp import Llama
 
 # 1. Configuration
 QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
-CONTEXT_WINDOW = 4096
+# Increased to 8192. Qwen 2.5 Coder handles this easily and it prevents truncation issues.
+CONTEXT_WINDOW = 8192
 target_path = QWEN_PATH
-loaded_model_name = "Qwen 2.5 Coder 7B (Agent Mode V8 Clean)"
+loaded_model_name = "Qwen 2.5 Coder 7B (Agent Mode V9 Context-Optimized)"
 
 
 # 2. Tool Definitions
-def read_file(filepath):
+def read_file(filepath, start_line=1, max_lines=200):
+    """Reads a file with smart pagination to prevent context window exhaustion."""
     try:
+        if not os.path.isfile(filepath):
+            return f"Error: '{filepath}' is not a file."
+
         with open(filepath, 'r', encoding='utf-8') as f:
-            return f.read()
+            lines = f.readlines()
+
+        total_lines = len(lines)
+        start_idx = max(0, int(start_line) - 1)
+        end_idx = start_idx + max(1, int(max_lines))
+
+        selected_lines = lines[start_idx:end_idx]
+        content = "".join(selected_lines)
+
+        if total_lines > end_idx:
+            content += f"\n\n... [TRUNCATED: Lines {end_idx + 1} to {total_lines} remain. Use read_file with start_line={end_idx + 1} if you need to read further] ..."
+
+        return content
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -38,7 +55,7 @@ def run_cmd(command):
         output = result.stdout
         if result.stderr:
             output += f"\nErrors:\n{result.stderr}"
-        return output[:2000]
+        return output[:1500]  # Slightly tightened to conserve space
     except Exception as e:
         return f"Error executing command: {e}"
 
@@ -51,32 +68,30 @@ def get_repo_structure(startpath, max_depth=3):
     start_sep = startpath.count(os.path.sep)
 
     for root, dirs, files in os.walk(startpath):
-        dirs[:] = [d for d in dirs if d not in ignore_dirs]  # Filter in-place
+        dirs[:] = [d for d in dirs if d not in ignore_dirs]
         depth = root.count(os.path.sep) - start_sep
 
         if depth > max_depth:
-            del dirs[:]  # Stop traversing deeper
+            del dirs[:]
             continue
 
         indent = ' ' * 4 * depth
         tree_str += f"{indent}{os.path.basename(root)}/\n"
         subindent = ' ' * 4 * (depth + 1)
         for f in files:
-            if not f.startswith('.'):  # Ignore hidden files
+            if not f.startswith('.'):
                 tree_str += f"{subindent}{f}\n"
 
-    return tree_str[:1500]  # Truncate to protect context window
+    return tree_str[:1200]  # Tightened structure ceiling
 
 
 # --- NATIVE HANDLER: /requirements ---
 def generate_requirements_native(target_dir):
     try:
-        # Force absolute path resolution
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
         if not os.path.isdir(abs_target_dir):
             return f"Error: Resolved path '{abs_target_dir}' is not a valid system directory."
 
-        # Scan for the local pip executable using the absolute path
         is_windows = platform.system() == "Windows"
         pip_bin = None
 
@@ -103,7 +118,7 @@ def generate_requirements_native(target_dir):
             shell=True,
             capture_output=True,
             text=True,
-            cwd=abs_target_dir,  # Enforce shell location context
+            cwd=abs_target_dir,
             timeout=15
         )
 
@@ -112,12 +127,10 @@ def generate_requirements_native(target_dir):
 
         raw_packages = result.stdout.strip()
 
-        # --- Empty Package Fix ---
         if not raw_packages:
             print("\n   [Notice] The virtual environment has 0 packages installed.")
             raw_packages = "# No dependencies found. The virtual environment is empty."
 
-        # Write to the absolute destination path
         with open(final_output_path, 'w', encoding='utf-8') as f:
             f.write(raw_packages + "\n")
 
@@ -146,23 +159,23 @@ SYSTEM_PROMPT = """You are an autonomous coding agent operating on the user's lo
 You solve tasks by thinking, planning, and using tools.
 
 AVAILABLE TOOLS:
-1. `read_file`: Reads a file from the disk. Args: {"filepath": "<string>"}
+1. `read_file`: Reads specified lines from disk. Args: {"filepath": "<string>", "start_line": <int>, "max_lines": <int>}
 2. `write_file`: Writes/overwrites a file. Args: {"filepath": "<string>", "content": "<string>"}
 3. `run_cmd`: Runs a terminal command. Args: {"command": "<string>"}
 
 HOW TO USE TOOLS:
-Whenever you need to interact with the system, you must output a JSON block wrapped in <tool_call> tags. 
-DO NOT write code or markdown outside of the "content" argument when writing files.
+Whenever you need to interact with the system, you must output a JSON block wrapped in <tool_call> tags.
+Do not waste context space. Be concise.
 
 Example format:
 <tool_call>
-{"name": "read_file", "args": {"filepath": "main.py"}}
+{"name": "read_file", "args": {"filepath": "main.py", "start_line": 1, "max_lines": 100}}
 </tool_call>
 
 WORKFLOW:
 1. Output ONE tool call at a time.
 2. Wait for the tool result before taking the next step.
-3. When the task is entirely complete, state "TASK COMPLETE"."""
+3. Keep file reading targeted—do not read huge files entirely if you only need context."""
 
 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -200,41 +213,36 @@ while True:
     if not user_input:
         continue
 
-    # --- MACRO: /requirements (Restored V6 Native Engine) ---
+    # --- MACRO: /requirements ---
     if user_input.startswith("/requirements"):
         parts = user_input.split(" ", 1)
         target_dir = parts[1].strip() if len(parts) > 1 else "."
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
-
-        print(f"\n[DEBUG] Resolving Destination: '{abs_target_dir}'")
 
         if not os.path.isdir(abs_target_dir):
             print(f"❌ Error: Target directory '{abs_target_dir}' does not exist.")
             continue
 
         print(f"\n⚠️  MANUAL OVERRIDE: Generate requirements.txt natively?")
-        print(f"Target Directory: {abs_target_dir}")
         approval = input("Allow this action? (y/n): ").strip().lower()
 
         if approval == 'y':
             tool_result = generate_requirements_native(abs_target_dir)
-            print(f"⚙️  Tool execution finished.")
-            print(f"🤖 Backend Hook Log: {tool_result}")
-            messages.append({"role": "user",
-                             "content": f"System Alert: The user manually executed the /requirements macro for '{abs_target_dir}'. Result: {tool_result}. Briefly acknowledge that the task is complete."})
+            # ISOLATE CONTEXT: Refresh history specifically for this systemic workflow
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",
+                 "content": f"System Alert: The user manually executed /requirements for '{abs_target_dir}'. Result: {tool_result}. Briefly acknowledge task completion."}
+            ]
         else:
             print("🛑 Action blocked.")
             continue
 
-    # --- MACRO: /readme (Hybrid Mode) ---
-    # ToDo: some smart reading of only certain lines in a file might be needed here,
-    # generation of README can take long
+    # --- MACRO: /readme ---
     elif user_input.startswith("/readme"):
         parts = user_input.split(" ", 1)
         target_dir = parts[1].strip() if len(parts) > 1 else "."
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
-
-        print(f"\n[DEBUG] Resolving Destination: '{abs_target_dir}'")
 
         if not os.path.isdir(abs_target_dir):
             print(f"❌ Error: Target directory '{abs_target_dir}' does not exist.")
@@ -245,7 +253,7 @@ while True:
 
         readme_path = os.path.join(abs_target_dir, "README.md")
         if os.path.exists(readme_path):
-            existing_readme = read_file(readme_path)
+            existing_readme = read_file(readme_path, max_lines=150)  # Constrained reading
             print("   [Notice] Existing README.md found. The Agent will attempt to update it.")
         else:
             existing_readme = "No existing README.md found. You must create one from scratch."
@@ -254,16 +262,20 @@ while True:
         hidden_prompt = (
             f"The user wants to write or update a `README.md` for the repository located at '{abs_target_dir}'.\n\n"
             f"--- REPOSITORY STRUCTURE ---\n{repo_tree}\n--------------------------\n\n"
-            f"--- EXISTING README.MD ---\n{existing_readme}\n--------------------------\n\n"
+            f"--- EXISTING README.MD (TEMPORARY SNIPPET) ---\n{existing_readme}\n--------------------------\n\n"
             f"YOUR TASK:\n"
-            f"1. Review the repository structure. Use the `read_file` tool to read 1 to 3 key source files (e.g., main.py, core logic) to understand the project deeply.\n"
-            f"2. Once you comprehend the code, use the `write_file` tool to save a detailed, professional README.md exactly to '{readme_path}'.\n"
-            f"3. If updating an existing README, preserve important original info but enhance the structure and descriptions."
+            f"1. Review the structure. Use the updated `read_file` tool to strategically read lines from 1 to 2 core source files if needed.\n"
+            f"2. Once ready, call `write_file` to save a beautiful README.md to '{readme_path}'.\n"
+            f"3. Do not output conversational filler. Execute your plan directly via tool calls."
         )
-        messages.append({"role": "user", "content": hidden_prompt})
+
+        # ISOLATE CONTEXT: Prevent previous chat logs from filling the window before a heavy write operation
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": hidden_prompt}
+        ]
 
     else:
-        # Standard free-text conversation passes through
         messages.append({"role": "user", "content": user_input})
 
     # Internal Agent Execution Loop
@@ -319,7 +331,10 @@ while True:
                     tool_result = ""
                     if approval == 'y':
                         if tool_name == "read_file":
-                            tool_result = read_file(tool_args.get("filepath"))
+                            # Handle paginated arguments passed by the model
+                            s_line = tool_args.get("start_line", 1)
+                            m_lines = tool_args.get("max_lines", 200)
+                            tool_result = read_file(tool_args.get("filepath"), start_line=s_line, max_lines=m_lines)
                         elif tool_name == "write_file":
                             tool_result = write_file(tool_args.get("filepath"), tool_args.get("content"))
                         elif tool_name == "run_cmd":
