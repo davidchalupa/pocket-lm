@@ -41,6 +41,8 @@ def read_file(filepath, start_line=1, max_lines=100):
 def write_file(filepath, content):
     """Creates or completely overwrites a file."""
     try:
+        if not content.strip():
+            return "Error: Refused to write an empty file. If you meant to stop, just announce completion."
         os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) else None
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -52,6 +54,8 @@ def write_file(filepath, content):
 def append_file(filepath, content):
     """Appends content to the end of an existing file. Perfect for building large files safely."""
     try:
+        if not content.strip():
+            return "Error: Refused to append empty whitespace. If the file is complete, announce completion and stop."
         if not os.path.exists(filepath):
             return f"Error: File '{filepath}' does not exist. Use write_file to initialize it first."
         with open(filepath, 'a', encoding='utf-8') as f:
@@ -82,6 +86,7 @@ def patch_file(filepath, search_text, replace_text):
     except Exception as e:
         return f"Error patching file: {e}"
 
+
 def run_cmd(command):
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
@@ -95,34 +100,23 @@ def run_cmd(command):
 
 # --- HYPER-ROBUST PAYLOAD PARSER ---
 def parse_robust_tool_call(response_content, tool_json_str):
-    """
-    Looks for a raw unescaped <payload> block first. If missing, falls back
-    to standard JSON processing, and then structural regex extraction.
-    Supports patch_file seamlessly.
-    """
-    # 1. Isolate an explicit unescaped payload tag if the model used it
     payload_match = re.search(r"<payload>(.*?)</payload>", response_content, re.DOTALL)
     raw_payload = payload_match.group(1) if payload_match else None
 
-    # Strip payload markers out of the json parsing target string if nested inside
     json_clean = re.sub(r"<payload>.*?</payload>", "", tool_json_str, flags=re.DOTALL).strip()
 
     try:
-        # 2. Attempt standard lenient json evaluation
         data = json.loads(json_clean, strict=False)
         if raw_payload is not None:
             if "args" not in data:
                 data["args"] = {}
-            # Fallback mapping: if model mistakenly uses <payload> for a patch action
             if data.get("name") in ["write_file", "append_file"]:
                 data["args"]["content"] = raw_payload
         return data
     except json.JSONDecodeError:
         pass
 
-    # 3. Structural regex fallback for poorly escaped inline string values
     cleaned = json_clean.strip()
-    # Updated regex to include patch_file
     name_match = re.search(r'"name"\s*:\s*"(write_file|append_file|read_file|run_cmd|patch_file)"', cleaned)
     if not name_match:
         raise json.JSONDecodeError("Could not isolate tool name signature from model string.", json_clean, 0)
@@ -158,11 +152,9 @@ def parse_robust_tool_call(response_content, tool_json_str):
         if fp_match:
             args["filepath"] = fp_match.group(1)
 
-        # Parse search_text out of broken JSON string block
         st_match = re.search(r'"search_text"\s*:\s*"', cleaned)
         if st_match:
             start_st = st_match.end()
-            # Find the end by looking ahead to the next key or end of block
             end_st_match = re.search(r'",\s*"replace_text"', cleaned)
             if end_st_match:
                 args["search_text"] = cleaned[start_st:end_st_match.start()]
@@ -170,7 +162,6 @@ def parse_robust_tool_call(response_content, tool_json_str):
                 args["search_text"] = cleaned[start_st:].split('",')[0]
             args["search_text"] = args["search_text"].replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n')
 
-        # Parse replace_text out of broken JSON string block
         rt_match = re.search(r'"replace_text"\s*:\s*"', cleaned)
         if rt_match:
             start_rt = rt_match.end()
@@ -297,7 +288,7 @@ else:
     print(f"❌ Error: Model file not found at {target_path}.")
     sys.exit(1)
 
-# 5. System Prompt (Upgraded with payload bypass guidance)
+# 5. System Prompt
 SYSTEM_PROMPT = """You are an autonomous coding agent operating on the user's local machine.
 You solve tasks by thinking, planning, and using tools modularly.
 
@@ -307,26 +298,25 @@ AVAILABLE TOOLS:
 3. `append_file`: Appends text to the end of a file. Args: {"filepath": "<string>"}
 4. `run_cmd`: Runs a terminal command. Args: {"command": "<string>"}
 
-CRITICAL FORMATTING FOR WRITING OR APPENDING FILES:
-To completely avoid JSON format escaping issues with literal quotation marks and complex system newlines, NEVER pass raw file data directly inside the arguments JSON block. Instead, use a specialized structural `<payload>` tag extension directly after your JSON arguments inside the tool call container:
+CRITICAL FORMATTING FOR SPEED AND SAFETY:
+1. To save generation time, ALWAYS output the JSON tool call minified on a SINGLE LINE.
+2. To completely avoid JSON format escaping issues, NEVER pass raw file data directly inside the JSON block. Use the specialized `<payload>` tag extension directly after your JSON container.
 
-<tool_call>
-{
-  "name": "write_file",
-  "args": {
-    "filepath": "path/to/target.py"
-  }
-}
+Example of the required high-speed, payload-safe format:
+<tool_call>{"name": "write_file", "args": {"filepath": "target.py"}}</tool_call>
 <payload>
 def sample_function():
     print("This content is completely unescaped and literal!")
     return True
 </payload>
-</tool_call>
+
+CRITICAL RULE: Never repeat, summarize, or print the contents of a file in your standard conversational response after writing or appending to it. Just acknowledge the successful write and move to the next step.
+If a file requires no changes, do NOT write or append empty blocks. Just state that the file is complete.
 
 Output exactly ONE tool call at a time wrapped in <tool_call> tags. Wait for tool execution results before outputting more code."""
 
 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+session_cwd = os.getcwd()
 
 print("\n" + "=" * 60)
 print(f"🤖 Local Agent Initialized: [{loaded_model_name}]")
@@ -353,6 +343,7 @@ while True:
             sys.exit(0)
         if line.strip() == "/clear":
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            session_cwd = os.getcwd()
             print("🧹 Memory cleared!")
             continue
 
@@ -367,6 +358,7 @@ while True:
         parts = user_input.split(" ", 1)
         target_dir = parts[1].strip() if len(parts) > 1 else "."
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
+        session_cwd = abs_target_dir
 
         if not os.path.isdir(abs_target_dir):
             print(f"❌ Error: Target directory '{abs_target_dir}' does not exist.")
@@ -391,6 +383,7 @@ while True:
         parts = user_input.split(" ", 1)
         target_dir = parts[1].strip() if len(parts) > 1 else "."
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
+        session_cwd = abs_target_dir
 
         if not os.path.isdir(abs_target_dir):
             print(f"❌ Error: Target directory '{abs_target_dir}' does not exist.")
@@ -400,22 +393,35 @@ while True:
         repo_tree = get_repo_structure(abs_target_dir)
 
         readme_path = os.path.join(abs_target_dir, "README.md")
+
+        # FIX: Dynamic strategy generation based on whether the file already exists
         if os.path.exists(readme_path):
             existing_readme = read_file(readme_path, max_lines=75)
             print("   [Notice] Existing README.md found. Agent will prepare updates modularly.")
+            strategy_steps = (
+                f"1. Review the existing README content above.\n"
+                f"2. If sections are missing or require polishing, use `append_file` or `write_file` to update them.\n"
+                f"3. If the existing README is already complete and requires no changes, DO NOT execute any tool calls. Simply announce completion and stop."
+            )
         else:
             existing_readme = "No existing README.md found. Create from scratch."
             print("   [Notice] No README.md found. Agent will draft a new one incrementally.")
+            strategy_steps = (
+                f"1. Use `read_file` with conservative line bounds to scan config profiles if needed.\n"
+                f"2. Use `write_file` along with the `<payload>` block to start the file section.\n"
+                f"3. Build remaining components sequentially using `<payload>` tags with `append_file` blocks.\n"
+                f"4. Once the README is complete, announce completion and stop."
+            )
 
         hidden_prompt = (
-            f"The user wants to generate or polish the `README.md` file located at '{readme_path}'.\n\n"
+            f"The user wants to generate or polish a README file.\n\n"
+            f"--- CONTEXT ---\n"
+            f"Target Directory: '{abs_target_dir}'\n"
+            f"Target File: README.md (Use exactly this relative filename in your tool calls to save tokens!)\n\n"
             f"--- REPOSITORY STRUCTURE ---\n{repo_tree}\n--------------------------\n\n"
             f"--- EXISTING README (FIRST 75 LINES) ---\n{existing_readme}\n--------------------------\n\n"
-            f"STRATEGY:\n"
-            f"1. Use `read_file` with conservative line bounds to scan config profiles.\n"
-            f"2. Use `write_file` along with the standalone `<payload>` blocks to start the file section.\n"
-            f"3. Build components block-by-block sequentially using discrete `<payload>` tags with `append_file` blocks.\n"
-            f"4. Proceed directly to step 1."
+            f"STRATEGY:\n{strategy_steps}\n\n"
+            f"CRITICAL: Do not echo or print the generated README content in your conversational text."
         )
 
         messages = [
@@ -473,14 +479,16 @@ while True:
                         raise json.JSONDecodeError("Incomplete payload due to context limit truncation.", tool_json_str,
                                                    0)
 
-                    # Extract cleanly with new robust payload architecture
                     tool_request = parse_robust_tool_call(response_content, tool_json_str)
                     tool_name = tool_request.get("name")
                     tool_args = tool_request.get("args", {})
 
+                    if "filepath" in tool_args and not os.path.isabs(tool_args["filepath"]):
+                        tool_args["filepath"] = os.path.abspath(os.path.join(session_cwd, tool_args["filepath"]))
+
                     print(f"\n⚠️  AGENT REQUESTS PERMISSION TO EXECUTE: {tool_name}")
                     if tool_name in ["write_file", "append_file"]:
-                        print(f"File: {tool_args.get('filepath')}")
+                        print(f"Resolved Target File: {tool_args.get('filepath')}")
                         print("Content Snippet: \n" + "-" * 20)
                         print(tool_args.get('content', '')[:300] + "\n...[truncated snippet]\n" + "-" * 20)
                     elif tool_name == "patch_file":
@@ -493,6 +501,8 @@ while True:
                     approval = input("Allow this action? (y/n/edit): ").strip().lower()
 
                     tool_result = ""
+                    tool_reinforcement = ""
+
                     if approval == 'y':
                         if tool_name == "read_file":
                             s_line = tool_args.get("start_line", 1)
@@ -500,8 +510,10 @@ while True:
                             tool_result = read_file(tool_args.get("filepath"), start_line=s_line, max_lines=m_lines)
                         elif tool_name == "write_file":
                             tool_result = write_file(tool_args.get("filepath"), tool_args.get("content"))
+                            tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output or summarize the file's contents back to the user. Proceed silently to your next logical step or announce completion.)"
                         elif tool_name == "append_file":
                             tool_result = append_file(tool_args.get("filepath"), tool_args.get("content"))
+                            tool_reinforcement = "\n\n(System Rule: Append successful. Do NOT output or summarize the file's contents back to the user. Proceed silently to your next logical step or announce completion.)"
                         elif tool_name == "run_cmd":
                             tool_result = run_cmd(tool_args.get("command"))
                         else:
@@ -515,16 +527,16 @@ while True:
                         tool_result = "User denied permission to execute this tool."
                         print("🛑 Action blocked by user.")
 
-                    messages.append({"role": "user", "content": f"Tool Execution Result:\n{tool_result}"})
+                    messages.append(
+                        {"role": "user", "content": f"Tool Execution Result:\n{tool_result}{tool_reinforcement}"})
                     continue
 
                 except json.JSONDecodeError as e:
-                    # FIX: We break instead of continue. This terminates ghost loops and drops directly back to you!
                     error_msg = (
                         f"Formatting Failure: {str(e)}\n"
-                        "Your block string parsing crashed. Remember to output using the separate raw tag:\n"
-                        "<tool_call>\n{\n  \"name\": \"write_file\",\n  \"args\": {\"filepath\": \"target_file.md\"}\n}\n"
-                        "<payload>\nRAW UNESCAPED CONTENT HERE\n</payload>\n</tool_call>"
+                        "Your block string parsing crashed. Remember to output using the minified raw tag:\n"
+                        "<tool_call>{\"name\": \"write_file\", \"args\": {\"filepath\": \"target_file.md\"}}</tool_call>\n"
+                        "<payload>\nRAW UNESCAPED CONTENT HERE\n</payload>"
                     )
                     print(f"\n❌ [Parser Interceptor] Halted a syntax loop. Returning loop control to user.")
                     messages.append({"role": "user", "content": error_msg})

@@ -3,14 +3,11 @@
 import os
 import requests
 from tqdm import tqdm
-
-import os
-import requests
-from tqdm import tqdm
+from pathlib import Path
 
 repo_id = "TheBloke/rocket-3B-GGUF"
 filename = "rocket-3b.Q4_K_M.gguf"
-dest_dir = "models"
+dest_dir = Path(__file__).resolve().parent.parent / "models"
 os.makedirs(dest_dir, exist_ok=True)
 
 url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"

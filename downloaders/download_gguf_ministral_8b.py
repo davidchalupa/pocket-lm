@@ -1,12 +1,14 @@
 import os
 import requests
 from tqdm import tqdm
+from pathlib import Path
 
-# Updated for Qwen 2.5 Coder 7B (GGUF)
-# Using bartowski's repo as it's a highly reliable source for GGUF quants
-repo_id = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
-filename = "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
-dest_dir = "models"
+# Updated for Ministral 8B Instruct (GGUF)
+# Origin: Mistral AI
+# This model is optimized for 16GB RAM 'edge' devices.
+repo_id = "bartowski/Ministral-8B-Instruct-2410-GGUF"
+filename = "Ministral-8B-Instruct-2410-Q4_K_M.gguf"
+dest_dir = Path(__file__).resolve().parent.parent / "models"
 
 os.makedirs(dest_dir, exist_ok=True)
 
@@ -15,11 +17,13 @@ url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
 tmp_path = os.path.join(dest_dir, filename + ".part")
 out_path = os.path.join(dest_dir, filename)
 
-print(f"Starting download: {filename}...")
-print(f"This is approximately 4.7GB. Grab a coffee!")
+print(f"🚀 Starting download: {filename}")
+print(f"Origin: Mistral AI | Size: ~5.3GB")
 
 try:
-    with requests.get(url, stream=True, timeout=30) as r:
+    # Adding a User-Agent header is a good practice for Hugging Face requests
+    headers = {"User-Agent": "Mozilla/5.0"}
+    with requests.get(url, stream=True, timeout=60, headers=headers) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length", 0))
 
@@ -36,7 +40,7 @@ try:
                     pbar.update(len(chunk))
 
     os.replace(tmp_path, out_path)
-    print("\n✅ Success! Model saved to:", out_path)
+    print(f"\n✅ Success! Model saved to: {out_path}")
 
 except Exception as e:
     print(f"\n❌ Download failed: {e}")

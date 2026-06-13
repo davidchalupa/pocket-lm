@@ -11,7 +11,7 @@ CONTEXT_WINDOW = 4096  # How much text it can remember at once
 
 # --- HARDCODED MODEL CHOICE ---
 # Change this variable to "ministral", "qwen", or "starcoder"
-SELECTED_MODEL = "ministral"
+SELECTED_MODEL = "qwen"
 # ------------------------------
 
 # 2. Initialization Logic

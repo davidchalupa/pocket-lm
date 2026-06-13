@@ -1,12 +1,13 @@
 import os
 import requests
 from tqdm import tqdm
+from pathlib import Path
 
 # StarCoder2-7B - Ungated Public Mirror
 # Using QuantFactory to bypass the 401 Authorization issues
 repo_id = "QuantFactory/starcoder2-7b-GGUF"
 filename = "starcoder2-7b.Q4_K_M.gguf"
-dest_dir = "models"
+dest_dir = Path(__file__).resolve().parent.parent / "models"
 
 os.makedirs(dest_dir, exist_ok=True)
 
