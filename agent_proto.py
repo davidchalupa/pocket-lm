@@ -61,6 +61,27 @@ def append_file(filepath, content):
         return f"Error appending to file: {e}"
 
 
+def patch_file(filepath, search_text, replace_text):
+    """Surgically replaces a specific block of text inside a file."""
+    try:
+        if not os.path.exists(filepath):
+            return f"Error: File '{filepath}' does not exist."
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        if search_text not in content:
+            return "Error: The exact 'search_text' block was not found in the file. Patch failed."
+
+        updated_content = content.replace(search_text, replace_text, 1)  # Only replace first match for safety
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(updated_content)
+
+        return f"Successfully patched {filepath}."
+    except Exception as e:
+        return f"Error patching file: {e}"
+
 def run_cmd(command):
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
@@ -77,6 +98,7 @@ def parse_robust_tool_call(response_content, tool_json_str):
     """
     Looks for a raw unescaped <payload> block first. If missing, falls back
     to standard JSON processing, and then structural regex extraction.
+    Supports patch_file seamlessly.
     """
     # 1. Isolate an explicit unescaped payload tag if the model used it
     payload_match = re.search(r"<payload>(.*?)</payload>", response_content, re.DOTALL)
@@ -91,14 +113,17 @@ def parse_robust_tool_call(response_content, tool_json_str):
         if raw_payload is not None:
             if "args" not in data:
                 data["args"] = {}
-            data["args"]["content"] = raw_payload
+            # Fallback mapping: if model mistakenly uses <payload> for a patch action
+            if data.get("name") in ["write_file", "append_file"]:
+                data["args"]["content"] = raw_payload
         return data
     except json.JSONDecodeError:
         pass
 
-    # 3. Structural regex fallback fallback for poorly escaped inline string values
+    # 3. Structural regex fallback for poorly escaped inline string values
     cleaned = json_clean.strip()
-    name_match = re.search(r'"name"\s*:\s*"(write_file|append_file|read_file|run_cmd)"', cleaned)
+    # Updated regex to include patch_file
+    name_match = re.search(r'"name"\s*:\s*"(write_file|append_file|read_file|run_cmd|patch_file)"', cleaned)
     if not name_match:
         raise json.JSONDecodeError("Could not isolate tool name signature from model string.", json_clean, 0)
 
@@ -126,6 +151,39 @@ def parse_robust_tool_call(response_content, tool_json_str):
                 args["content"] = args["content"].replace('\\"', '"').replace('\\\\', '\\')
 
         if "filepath" in args and "content" in args:
+            return {"name": tool_name, "args": args}
+
+    elif tool_name == "patch_file":
+        fp_match = re.search(r'"filepath"\s*:\s*"(.*?)"', cleaned)
+        if fp_match:
+            args["filepath"] = fp_match.group(1)
+
+        # Parse search_text out of broken JSON string block
+        st_match = re.search(r'"search_text"\s*:\s*"', cleaned)
+        if st_match:
+            start_st = st_match.end()
+            # Find the end by looking ahead to the next key or end of block
+            end_st_match = re.search(r'",\s*"replace_text"', cleaned)
+            if end_st_match:
+                args["search_text"] = cleaned[start_st:end_st_match.start()]
+            else:
+                args["search_text"] = cleaned[start_st:].split('",')[0]
+            args["search_text"] = args["search_text"].replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n')
+
+        # Parse replace_text out of broken JSON string block
+        rt_match = re.search(r'"replace_text"\s*:\s*"', cleaned)
+        if rt_match:
+            start_rt = rt_match.end()
+            end_rt_match = re.search(r'"\s*\}\s*\}\s*$', cleaned) or re.search(r'"\s*\}\s*$', cleaned)
+            if end_rt_match:
+                args["replace_text"] = cleaned[start_rt:end_rt_match.start()]
+            else:
+                raw_tail = cleaned[start_rt:].rstrip(' \n\t}')
+                if raw_tail.endswith('"'): raw_tail = raw_tail[:-1]
+                args["replace_text"] = raw_tail
+            args["replace_text"] = args["replace_text"].replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n')
+
+        if "filepath" in args and "search_text" in args and "replace_text" in args:
             return {"name": tool_name, "args": args}
 
     elif tool_name == "run_cmd":
@@ -425,6 +483,10 @@ while True:
                         print(f"File: {tool_args.get('filepath')}")
                         print("Content Snippet: \n" + "-" * 20)
                         print(tool_args.get('content', '')[:300] + "\n...[truncated snippet]\n" + "-" * 20)
+                    elif tool_name == "patch_file":
+                        print(f"Patching File: {tool_args.get('filepath')}")
+                        print(f"Targeting Code block:\n--->\n{tool_args.get('search_text')}\n<---")
+                        print(f"Replacing With:\n--->\n{tool_args.get('replace_text')}\n<---")
                     else:
                         print(f"Arguments: {tool_args}")
 
