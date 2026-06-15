@@ -7,8 +7,10 @@ import fitz  # PyMuPDF
 from sentence_transformers import SentenceTransformer
 from llama_cpp import Llama
 
-# Configuration
-MODEL_PATH = "models/Ministral-8B-Instruct-2410-Q4_K_M.gguf"
+# Model Path Configurations
+MINISTRAL_PATH = "models/Ministral-8B-Instruct-2410-Q4_K_M.gguf"
+ROCKET_PATH = "models/rocket-3b.Q4_K_M.gguf"
+
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"  # Lightweight and highly efficient local embedding model
 CACHE_FILE = "rag_index_cache.pkl"
 CHUNK_SIZE = 600  # Character count per chunk
@@ -109,11 +111,16 @@ def retrieve_context(query, index_data, embed_model, top_k=7):
 def main():
     parser = argparse.ArgumentParser(description="Simple Local RAG CLI for Scientific Papers")
     parser.add_argument("directory", help="Path to the directory containing your PDF files")
+    parser.add_argument("--fast", action="store_true", help="Use Rocket-3B instead of Ministral-8B for speed")
     args = parser.parse_args()
 
     if not os.path.isdir(args.directory):
         print(f"Error: Directory '{args.directory}' does not exist.")
         sys.exit(1)
+
+    # Determine which model path to use
+    selected_model_path = ROCKET_PATH if args.fast else MINISTRAL_PATH
+    model_name = "Rocket-3B" if args.fast else "Ministral-8B"
 
     # 1. Build or Load Index
     index_data = build_or_load_index(args.directory)
@@ -123,19 +130,19 @@ def main():
     embed_model = SentenceTransformer(EMBED_MODEL_NAME)
 
     # 3. Load the Local GGUF LLM
-    print(f"Loading LLM from {MODEL_PATH} (Context window configured to 4096)...")
-    if not os.path.exists(MODEL_PATH):
-        print(f"Error: Model not found at {MODEL_PATH}. Check your path assignment.")
+    print(f"Loading {model_name} from {selected_model_path} (Context window: 4096)...")
+    if not os.path.exists(selected_model_path):
+        print(f"Error: Model file not found at {selected_model_path}. Please check your path assignments.")
         sys.exit(1)
 
     llm = Llama(
-        model_path=MODEL_PATH,
-        n_ctx=4096,  # 4k is usually enough for a 7-chunk prompt context
+        model_path=selected_model_path,
+        n_ctx=4096,
         n_threads=os.cpu_count() or 4
     )
 
     print("\n" + "=" * 50)
-    print(" RAG ASSISTANT READY. Ask your questions below.")
+    print(f" RAG ASSISTANT READY ({model_name} Mode). Ask your questions.")
     print(" Type 'exit' or 'quit' to close.")
     print("=" * 50 + "\n")
 
@@ -158,15 +165,13 @@ def main():
                 context_str += f"--- CONTEXT BLOCK {i} (Source Document: {chunk['source']}) ---\n"
                 context_str += f"{chunk['text']}\n\n"
 
-            # Construct Mistral format prompt
+            # Construct standard clean prompt layout
             prompt = (
-                "<s>[INST] You are an expert scientific research assistant. "
+                "System: You are an expert scientific research assistant. "
                 "Analyze the provided context blocks extracted from local PDF documents to answer the user query. "
-                "Every context block explicitly lists its 'Source Document' filename at the top. "
-                "If the user asks about a specific paper, look for context blocks matching that filename. "
-                "If multiple papers address the problem, list their filenames in your response.\n\n"
+                "Every context block explicitly lists its 'Source Document' filename at the top.\n\n"
                 f"CONTEXT:\n{context_str}\n"
-                f"USER QUERY: {query} [/INST]"
+                f"USER QUERY: {query}"
             )
 
             # Generate response
