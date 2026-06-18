@@ -8,7 +8,6 @@ from llama_cpp import Llama
 
 from coding_agent.tool_definitions import read_file, write_file, append_file, patch_file, run_cmd
 
-
 # 1. Configuration
 QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
 CONTEXT_WINDOW = 8192  # Ensure maximum headroom for analysis
@@ -25,11 +24,17 @@ def parse_robust_tool_call(response_content, tool_json_str):
 
     try:
         data = json.loads(json_clean, strict=False)
+        if "args" not in data:
+            data["args"] = {}
+
         if raw_payload is not None:
-            if "args" not in data:
-                data["args"] = {}
             if data.get("name") in ["write_file", "append_file"]:
                 data["args"]["content"] = raw_payload
+        else:
+            # FIX 1: Safely default missing payloads to empty strings
+            if data.get("name") in ["write_file", "append_file"] and "content" not in data["args"]:
+                data["args"]["content"] = ""
+
         return data
     except json.JSONDecodeError:
         pass
@@ -61,8 +66,11 @@ def parse_robust_tool_call(response_content, tool_json_str):
                     if raw_tail.endswith('"'): raw_tail = raw_tail[:-1]
                     args["content"] = raw_tail
                 args["content"] = args["content"].replace('\\"', '"').replace('\\\\', '\\')
+            else:
+                # FIX 1 (Regex Fallback): Default to empty string if regex finds no content block
+                args["content"] = ""
 
-        if "filepath" in args and "content" in args:
+        if "filepath" in args:
             return {"name": tool_name, "args": args}
 
     elif tool_name == "patch_file":
@@ -313,14 +321,15 @@ while True:
 
         readme_path = os.path.join(abs_target_dir, "README.md")
 
-        # FIX: Dynamic strategy generation based on whether the file already exists
+        # FIX 2: Dynamic strategy generation with explicit truncation and empty payload warnings
         if os.path.exists(readme_path):
-            existing_readme = read_file(readme_path, max_lines=75)
+            existing_readme = read_file(readme_path, start_line=1, max_lines=75)
             print("   [Notice] Existing README.md found. Agent will prepare updates modularly.")
             strategy_steps = (
-                f"1. Review the existing README content above.\n"
-                f"2. If sections are missing or require polishing, use `append_file` or `write_file` to update them.\n"
-                f"3. If the existing README is already complete and requires no changes, DO NOT execute any tool calls. Simply announce completion and stop."
+                f"1. Review the existing README snippet above (Note: it is truncated to the first 75 lines).\n"
+                f"2. CRITICAL: If the README is already sufficient or you have nothing new to add, DO NOT execute any tool calls. Simply reply with a message announcing completion and stop.\n"
+                f"3. NEVER use `write_file` on an existing README. Because you can only see the first 75 lines, writing to it will delete the rest of the unseen document. If you must add missing sections, ONLY use `append_file`.\n"
+                f"4. NEVER execute `append_file` with an empty `<payload>`. If you trigger a tool, you must provide actual markdown content to append."
             )
         else:
             existing_readme = "No existing README.md found. Create from scratch."
@@ -404,6 +413,17 @@ while True:
 
                     if "filepath" in tool_args and not os.path.isabs(tool_args["filepath"]):
                         tool_args["filepath"] = os.path.abspath(os.path.join(session_cwd, tool_args["filepath"]))
+
+                    # FIX 3: Hard Interceptor for Empty Payloads on write/append
+                    if tool_name in ["write_file", "append_file"]:
+                        content = tool_args.get('content', '')
+                        if not content.strip():
+                            print(f"🛑 [Parser Interceptor] Blocked an empty {tool_name} operation.")
+                            messages.append({
+                                "role": "user",
+                                "content": f"System Alert: You attempted to call {tool_name} with an empty payload. If you have no changes to make, do NOT call a tool. Announce completion instead."
+                            })
+                            continue
 
                     print(f"\n⚠️  AGENT REQUESTS PERMISSION TO EXECUTE: {tool_name}")
                     if tool_name in ["write_file", "append_file"]:
