@@ -1,3 +1,4 @@
+
 # pocket-lm
 
 A collection of scripts and models for various coding and conversational tasks using local small LLMs.
@@ -8,7 +9,7 @@ for instruction and coding.
 
 - `coding_consultant.py`: A script for providing coding assistance and consultation.
 - `conversation.py`: A script for handling general conversation and interaction.
-- `conversation_with_docs.py`: An enhanced version of `conversation.py` that includes documentation support.
+- `paper_rag_explorer.py`: A script for exploring papers using a RAG model.
 - `simple_coding_agent.py`: A basic coding agent for automating simple coding tasks.
 
 ## Models

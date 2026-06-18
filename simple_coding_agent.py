@@ -31,7 +31,6 @@ def parse_robust_tool_call(response_content, tool_json_str):
             if data.get("name") in ["write_file", "append_file"]:
                 data["args"]["content"] = raw_payload
         else:
-            # FIX 1: Safely default missing payloads to empty strings
             if data.get("name") in ["write_file", "append_file"] and "content" not in data["args"]:
                 data["args"]["content"] = ""
 
@@ -67,7 +66,6 @@ def parse_robust_tool_call(response_content, tool_json_str):
                     args["content"] = raw_tail
                 args["content"] = args["content"].replace('\\"', '"').replace('\\\\', '\\')
             else:
-                # FIX 1 (Regex Fallback): Default to empty string if regex finds no content block
                 args["content"] = ""
 
         if "filepath" in args:
@@ -222,12 +220,12 @@ AVAILABLE TOOLS:
 1. `read_file`: Reads line bounds from disk. Args: {"filepath": "<string>", "start_line": <int>, "max_lines": <int>}
 2. `write_file`: Overwrites or initializes a file. Args: {"filepath": "<string>"}
 3. `append_file`: Appends text to the end of a file. Args: {"filepath": "<string>"}
-4. `patch_file`: Surgically replaces a specific block of text inside a file. Args: {"filepath": "<string>"}
+4. `patch_file`: Surgically replaces a specific block of text inside a file. It searches for an exact matching block of text (`search_text`) and replaces its first occurrence with `replace_text`. Args: {"filepath": "<string>", "search_text": "<string>", "replace_text": "<string>"}
 5. `run_cmd`: Runs a terminal command. Args: {"command": "<string>"}
 
 CRITICAL FORMATTING FOR SPEED AND SAFETY:
 1. To save generation time, ALWAYS output the JSON tool call minified on a SINGLE LINE.
-2. To completely avoid JSON format escaping issues, NEVER pass raw file data directly inside the JSON block. Use the specialized `<payload>` tag extension directly after your JSON container.
+2. To completely avoid JSON format escaping issues, NEVER pass raw file data directly inside the JSON block. Use the specialized `<payload>` tag extension directly after your JSON container when using `write_file` or `append_file`.
 
 Example of the required high-speed, payload-safe format:
 <tool_call>{"name": "write_file", "args": {"filepath": "target.py"}}</tool_call>
@@ -237,8 +235,8 @@ def sample_function():
     return True
 </payload>
 
-CRITICAL RULE: Never repeat, summarize, or print the contents of a file in your standard conversational response after writing or appending to it. Just acknowledge the successful write and move to the next step.
-If a file requires no changes, do NOT write or append empty blocks. Just state that the file is complete.
+CRITICAL RULE: Never repeat, summarize, or print the contents of a file in your standard conversational response after writing, patching, or appending to it. Just acknowledge the successful write and move to the next step.
+If a file requires no changes, do NOT write, patch, or append empty blocks. Just state that the file is complete.
 
 Output exactly ONE tool call at a time wrapped in <tool_call> tags. Wait for tool execution results before outputting more code."""
 
@@ -321,35 +319,33 @@ while True:
 
         readme_path = os.path.join(abs_target_dir, "README.md")
 
-        # FIX 2: Dynamic strategy generation with explicit truncation and empty payload warnings
         if os.path.exists(readme_path):
-            existing_readme = read_file(readme_path, start_line=1, max_lines=75)
-            print("   [Notice] Existing README.md found. Agent will prepare updates modularly.")
+            existing_readme = read_file(readme_path, start_line=1, max_lines=1000)
+            print("   [Notice] Existing README.md found. Forcing structural analysis.")
             strategy_steps = (
-                f"1. Review the existing README snippet above (Note: it is truncated to the first 75 lines).\n"
-                f"2. CRITICAL: If the README is already sufficient or you have nothing new to add, DO NOT execute any tool calls. Simply reply with a message announcing completion and stop.\n"
-                f"3. NEVER use `write_file` on an existing README. Because you can only see the first 75 lines, writing to it will delete the rest of the unseen document. If you must add missing sections, ONLY use `append_file`.\n"
-                f"4. NEVER execute `append_file` with an empty `<payload>`. If you trigger a tool, you must provide actual markdown content to append."
+                f"1. ANALYSIS PHASE (Mandatory): You MUST begin your response with a bulleted list explicitly comparing the files mentioned in the Existing README against the Current Repository Structure. State clearly if any file names have changed, if directories are missing, or if the structure is stale.\n"
+                f"2. UPDATE PHASE: If your analysis reveals ANY discrepancies (e.g., stale file names, missing core context), you MUST execute a `patch_file` or `write_file` tool call to fix the README. Focus heavily on the project's core concept and main files. Exclude trivial files and license info entirely.\n"
+                f"3. COMPLETION: ONLY if your written analysis concludes that the README perfectly matches the current repo and requires zero updates, announce completion and stop."
             )
         else:
             existing_readme = "No existing README.md found. Create from scratch."
-            print("   [Notice] No README.md found. Agent will draft a new one incrementally.")
+            print("   [Notice] No README.md found. Agent will draft a new one focusing on project concept.")
             strategy_steps = (
-                f"1. Use `read_file` with conservative line bounds to scan config profiles if needed.\n"
-                f"2. Use `write_file` along with the `<payload>` block to start the file section.\n"
-                f"3. Build remaining components sequentially using `<payload>` tags with `append_file` blocks.\n"
-                f"4. Once the README is complete, announce completion and stop."
+                f"1. Evaluate the repository structure below to infer the overall structural concept of the project.\n"
+                f"2. Use `write_file` along with the `<payload>` block to initialize the README file from scratch.\n"
+                f"3. Focus heavily on the functional purpose, setup, and concept of the project. Highlight only the most critical files. Do NOT include license sections or trivial boilerplate.\n"
+                f"4. Once finished, announce completion and stop."
             )
 
         hidden_prompt = (
-            f"The user wants to generate or polish a README file.\n\n"
+            f"The user wants to evaluate and maintain a clean, high-quality documentation README file.\n\n"
             f"--- CONTEXT ---\n"
             f"Target Directory: '{abs_target_dir}'\n"
-            f"Target File: README.md (Use exactly this relative filename in your tool calls to save tokens!)\n\n"
-            f"--- REPOSITORY STRUCTURE ---\n{repo_tree}\n--------------------------\n\n"
-            f"--- EXISTING README (FIRST 75 LINES) ---\n{existing_readme}\n--------------------------\n\n"
+            f"Target File: README.md (Use exactly this relative filename in your tool calls)\n\n"
+            f"--- CURRENT REPOSITORY STRUCTURE ---\n{repo_tree}\n--------------------------\n\n"
+            f"--- ENTIRE EXISTING README CONTENT ---\n{existing_readme}\n--------------------------\n\n"
             f"STRATEGY:\n{strategy_steps}\n\n"
-            f"CRITICAL: Do not echo or print the generated README content in your conversational text."
+            f"CRITICAL: Do not call tools with empty arguments or empty payloads."
         )
 
         messages = [
@@ -414,7 +410,7 @@ while True:
                     if "filepath" in tool_args and not os.path.isabs(tool_args["filepath"]):
                         tool_args["filepath"] = os.path.abspath(os.path.join(session_cwd, tool_args["filepath"]))
 
-                    # FIX 3: Hard Interceptor for Empty Payloads on write/append
+                    # Hard Interceptor for Empty Payloads on write/append mutations
                     if tool_name in ["write_file", "append_file"]:
                         content = tool_args.get('content', '')
                         if not content.strip():
@@ -453,6 +449,10 @@ while True:
                         elif tool_name == "append_file":
                             tool_result = append_file(tool_args.get("filepath"), tool_args.get("content"))
                             tool_reinforcement = "\n\n(System Rule: Append successful. Do NOT output or summarize the file's contents back to the user. Proceed silently to your next logical step or announce completion.)"
+                        elif tool_name == "patch_file":
+                            tool_result = patch_file(tool_args.get("filepath"), tool_args.get("search_text"),
+                                                     tool_args.get("replace_text"))
+                            tool_reinforcement = "\n\n(System Rule: Patch surgical rewrite successful. Do NOT summarize changes. Proceed to your next logical step.)"
                         elif tool_name == "run_cmd":
                             tool_result = run_cmd(tool_args.get("command"))
                         else:
