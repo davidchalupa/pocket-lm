@@ -225,18 +225,17 @@ AVAILABLE TOOLS:
 
 CRITICAL FORMATTING FOR SPEED AND SAFETY:
 1. To save generation time, ALWAYS output the JSON tool call minified on a SINGLE LINE.
-2. To completely avoid JSON format escaping issues, NEVER pass raw file data directly inside the JSON block. Use the specialized `<payload>` tag extension directly after your JSON container when using `write_file` or `append_file`.
+2. To completely avoid JSON format escaping issues, NEVER pass raw file data directly inside the JSON block. Instead, include the specialized `<payload>` tag extension INSIDE the tool call, right after your JSON container.
 
 Example of the required high-speed, payload-safe format:
-<tool_call>{"name": "write_file", "args": {"filepath": "target.py"}}</tool_call>
+<tool_call>{"name": "write_file", "args": {"filepath": "target.py"}}
 <payload>
 def sample_function():
     print("This content is completely unescaped and literal!")
     return True
-</payload>
+</payload></tool_call>
 
-CRITICAL RULE: Never repeat, summarize, or print the contents of a file in your standard conversational response after writing, patching, or appending to it. Just acknowledge the successful write and move to the next step.
-If a file requires no changes, do NOT write, patch, or append empty blocks. Just state that the file is complete.
+CRITICAL RULE: Never repeat, summarize, or print the contents of a file in your standard conversational response...
 
 Output exactly ONE tool call at a time wrapped in <tool_call> tags. Wait for tool execution results before outputting more code."""
 
@@ -323,18 +322,18 @@ while True:
             existing_readme = read_file(readme_path, start_line=1, max_lines=1000)
             print("   [Notice] Existing README.md found. Forcing structural analysis.")
             strategy_steps = (
-                f"1. ANALYSIS PHASE (Mandatory): You MUST begin your response with a bulleted list explicitly comparing the files mentioned in the Existing README against the Current Repository Structure. State clearly if any file names have changed, if directories are missing, or if the structure is stale.\n"
-                f"2. UPDATE PHASE: If your analysis reveals ANY discrepancies (e.g., stale file names, missing core context), you MUST execute a `patch_file` or `write_file` tool call to fix the README. Focus heavily on the project's core concept and main files. Exclude trivial files and license info entirely.\n"
-                f"3. COMPLETION: ONLY if your written analysis concludes that the README perfectly matches the current repo and requires zero updates, announce completion and stop."
+                f"1. ANALYSIS PHASE: Begin your response with a bulleted list comparing the files mentioned in the Existing README against the Current Repository Structure.\n"
+                f"2. UPDATE PHASE: If discrepancies exist, execute ONE `patch_file` or `write_file` tool call to fix the README.\n"
+                f"3. COMPLETION (CRITICAL): Once your tool call executes successfully, or if no updates are needed, your task is complete. Output a short text confirmation and DO NOT invoke any further tools."
             )
         else:
             existing_readme = "No existing README.md found. Create from scratch."
             print("   [Notice] No README.md found. Agent will draft a new one focusing on project concept.")
             strategy_steps = (
-                f"1. Evaluate the repository structure below to infer the overall structural concept of the project.\n"
+                f"1. Evaluate the repository structure below to infer the overall concept of the project.\n"
                 f"2. Use `write_file` along with the `<payload>` block to initialize the README file from scratch.\n"
-                f"3. Focus heavily on the functional purpose, setup, and concept of the project. Highlight only the most critical files. Do NOT include license sections or trivial boilerplate.\n"
-                f"4. Once finished, announce completion and stop."
+                f"3. Focus on functional purpose and setup. Exclude trivial boilerplate.\n"
+                f"4. COMPLETION (CRITICAL): After the file is written, output a final conversational message announcing completion and DO NOT invoke any further tools."
             )
 
         hidden_prompt = (
@@ -445,14 +444,14 @@ while True:
                             tool_result = read_file(tool_args.get("filepath"), start_line=s_line, max_lines=m_lines)
                         elif tool_name == "write_file":
                             tool_result = write_file(tool_args.get("filepath"), tool_args.get("content"))
-                            tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output or summarize the file's contents back to the user. Proceed silently to your next logical step or announce completion.)"
+                            tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output the file's contents. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
                         elif tool_name == "append_file":
                             tool_result = append_file(tool_args.get("filepath"), tool_args.get("content"))
-                            tool_reinforcement = "\n\n(System Rule: Append successful. Do NOT output or summarize the file's contents back to the user. Proceed silently to your next logical step or announce completion.)"
+                            tool_reinforcement = "\n\n(System Rule: Append successful. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
                         elif tool_name == "patch_file":
                             tool_result = patch_file(tool_args.get("filepath"), tool_args.get("search_text"),
                                                      tool_args.get("replace_text"))
-                            tool_reinforcement = "\n\n(System Rule: Patch surgical rewrite successful. Do NOT summarize changes. Proceed to your next logical step.)"
+                            tool_reinforcement = "\n\n(System Rule: Patch successful. Do not summarize. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
                         elif tool_name == "run_cmd":
                             tool_result = run_cmd(tool_args.get("command"))
                         else:
