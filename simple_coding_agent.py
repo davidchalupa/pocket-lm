@@ -4,15 +4,32 @@ import json
 import subprocess
 import re
 import platform
+import ast
 from llama_cpp import Llama
 
-from coding_agent.tool_definitions import read_file, write_file, append_file, patch_file, run_cmd
+# Assumes patch_file has been removed from tool_definitions
+from coding_agent.tool_definitions import read_file, write_file, append_file, run_cmd
 
 # 1. Configuration
 QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
-CONTEXT_WINDOW = 8192  # Ensure maximum headroom for analysis
+CONTEXT_WINDOW = 8192
 target_path = QWEN_PATH
-loaded_model_name = "Qwen 2.5 Coder 7B (Agent Mode V11 Payload-Safe)"
+loaded_model_name = "Qwen 2.5 Coder 7B (Agent Mode V12 Rewriter+Linter)"
+
+
+# --- NATIVE LINTER ---
+def check_python_syntax(filepath):
+    """Natively checks Python files for basic syntax errors."""
+    if not filepath.endswith('.py'):
+        return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            ast.parse(f.read(), filename=filepath)
+        return None
+    except SyntaxError as e:
+        return f"SyntaxError on line {e.lineno}: {e.msg}\n{e.text}"
+    except Exception as e:
+        return f"Linter error: {e}"
 
 
 # --- HYPER-ROBUST PAYLOAD PARSER ---
@@ -38,8 +55,9 @@ def parse_robust_tool_call(response_content, tool_json_str):
     except json.JSONDecodeError:
         pass
 
+    # Fallback RegEx Parser
     cleaned = json_clean.strip()
-    name_match = re.search(r'"name"\s*:\s*"(write_file|append_file|read_file|run_cmd|patch_file)"', cleaned)
+    name_match = re.search(r'"name"\s*:\s*"(write_file|append_file|read_file|run_cmd)"', cleaned)
     if not name_match:
         raise json.JSONDecodeError("Could not isolate tool name signature from model string.", json_clean, 0)
 
@@ -48,13 +66,12 @@ def parse_robust_tool_call(response_content, tool_json_str):
 
     if tool_name in ["write_file", "append_file"]:
         fp_match = re.search(r'"filepath"\s*:\s*"(.*?)"', cleaned)
-        if fp_match:
-            args["filepath"] = fp_match.group(1)
+        if fp_match: args["filepath"] = fp_match.group(1)
 
         if raw_payload is not None:
             args["content"] = raw_payload
         else:
-            content_match = re.search(r'"content"\s*:\s*验证"', cleaned) or re.search(r'"content"\s*:\s*"', cleaned)
+            content_match = re.search(r'"content"\s*:\s*"', cleaned)
             if content_match:
                 start_idx = content_match.end()
                 end_match = re.search(r'"\s*\}\s*\}\s*$', cleaned) or re.search(r'"\s*\}\s*$', cleaned)
@@ -69,36 +86,6 @@ def parse_robust_tool_call(response_content, tool_json_str):
                 args["content"] = ""
 
         if "filepath" in args:
-            return {"name": tool_name, "args": args}
-
-    elif tool_name == "patch_file":
-        fp_match = re.search(r'"filepath"\s*:\s*"(.*?)"', cleaned)
-        if fp_match:
-            args["filepath"] = fp_match.group(1)
-
-        st_match = re.search(r'"search_text"\s*:\s*"', cleaned)
-        if st_match:
-            start_st = st_match.end()
-            end_st_match = re.search(r'",\s*"replace_text"', cleaned)
-            if end_st_match:
-                args["search_text"] = cleaned[start_st:end_st_match.start()]
-            else:
-                args["search_text"] = cleaned[start_st:].split('",')[0]
-            args["search_text"] = args["search_text"].replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n')
-
-        rt_match = re.search(r'"replace_text"\s*:\s*"', cleaned)
-        if rt_match:
-            start_rt = rt_match.end()
-            end_rt_match = re.search(r'"\s*\}\s*\}\s*$', cleaned) or re.search(r'"\s*\}\s*$', cleaned)
-            if end_rt_match:
-                args["replace_text"] = cleaned[start_rt:end_rt_match.start()]
-            else:
-                raw_tail = cleaned[start_rt:].rstrip(' \n\t}')
-                if raw_tail.endswith('"'): raw_tail = raw_tail[:-1]
-                args["replace_text"] = raw_tail
-            args["replace_text"] = args["replace_text"].replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n')
-
-        if "filepath" in args and "search_text" in args and "replace_text" in args:
             return {"name": tool_name, "args": args}
 
     elif tool_name == "run_cmd":
@@ -155,7 +142,7 @@ def generate_requirements_native(target_dir):
     try:
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
         if not os.path.isdir(abs_target_dir):
-            return f"Error: Resolved path '{abs_target_dir}' is not a valid system directory."
+            return f"Error: Resolved path '{abs_target_dir}' is not a valid directory."
 
         is_windows = platform.system() == "Windows"
         pip_bin = None
@@ -163,14 +150,9 @@ def generate_requirements_native(target_dir):
         for venv_name in [".venv", "venv", "env"]:
             potential_path = os.path.join(abs_target_dir, venv_name)
             if os.path.isdir(potential_path):
-                if is_windows:
-                    test_pip = os.path.join(potential_path, "Scripts", "pip.exe")
-                else:
-                    test_pip = os.path.join(potential_path, "bin", "pip")
-
-                if os.path.isfile(test_pip):
-                    pip_bin = test_pip
-                    break
+                pip_bin = os.path.join(potential_path, "Scripts", "pip.exe") if is_windows else os.path.join(
+                    potential_path, "bin", "pip")
+                if os.path.isfile(pip_bin): break
 
         if not pip_bin:
             return f"Error: No virtual environment found inside '{abs_target_dir}'."
@@ -178,20 +160,14 @@ def generate_requirements_native(target_dir):
         final_output_path = os.path.join(abs_target_dir, "requirements.txt")
         print(f"   [Backend] Executing: '{pip_bin}' freeze")
 
-        result = subprocess.run(
-            f'"{pip_bin}" freeze', shell=True, capture_output=True, text=True, cwd=abs_target_dir, timeout=15
-        )
+        result = subprocess.run(f'"{pip_bin}" freeze', shell=True, capture_output=True, text=True, cwd=abs_target_dir,
+                                timeout=15)
 
-        if result.returncode != 0:
-            return f"Error: Pip execution failed. Stderr: {result.stderr}"
+        if result.returncode != 0: return f"Error: Pip failed. Stderr: {result.stderr}"
 
-        raw_packages = result.stdout.strip()
-        if not raw_packages:
-            raw_packages = "# No dependencies found. The virtual environment is empty."
-
+        raw_packages = result.stdout.strip() or "# No dependencies found."
         with open(final_output_path, 'w', encoding='utf-8') as f:
             f.write(raw_packages + "\n")
-
         return f"SUCCESS: Natively generated target file: '{final_output_path}'"
 
     except Exception as e:
@@ -202,42 +178,34 @@ def generate_requirements_native(target_dir):
 if os.path.exists(target_path):
     print(f"Loading {loaded_model_name} into RAM...")
     try:
-        llm = Llama(
-            model_path=target_path, n_ctx=CONTEXT_WINDOW, n_threads=6, n_batch=512, verbose=False
-        )
+        llm = Llama(model_path=target_path, n_ctx=CONTEXT_WINDOW, n_threads=6, n_batch=512, verbose=False)
     except Exception as e:
         print(f"❌ Failed to load: {e}")
         sys.exit(1)
 else:
-    print(f"❌ Error: Model file not found at {target_path}.")
+    print(f"❌ Error: Model not found at {target_path}.")
     sys.exit(1)
 
-# 5. System Prompt
-SYSTEM_PROMPT = """You are an autonomous coding agent operating on the user's local machine.
-You solve tasks by thinking, planning, and using tools modularly.
+# 5. System Prompt (Simplified & Aggressive)
+SYSTEM_PROMPT = """You are an autonomous coding agent. Solve tasks using tools.
 
 AVAILABLE TOOLS:
-1. `read_file`: Reads line bounds from disk. Args: {"filepath": "<string>", "start_line": <int>, "max_lines": <int>}
-2. `write_file`: Overwrites or initializes a file. Args: {"filepath": "<string>"}
-3. `append_file`: Appends text to the end of a file. Args: {"filepath": "<string>"}
-4. `patch_file`: Surgically replaces a specific block of text inside a file. It searches for an exact matching block of text (`search_text`) and replaces its first occurrence with `replace_text`. Args: {"filepath": "<string>", "search_text": "<string>", "replace_text": "<string>"}
-5. `run_cmd`: Runs a terminal command. Args: {"command": "<string>"}
+1. `read_file`: Reads a file. Args: {"filepath": "<string>", "start_line": <int>, "max_lines": <int>}
+2. `write_file`: Overwrites/creates a file ENTIRELY. Args: {"filepath": "<string>"}
+3. `append_file`: Appends text to a file. Args: {"filepath": "<string>"}
+4. `run_cmd`: Runs a terminal command. Args: {"command": "<string>"}
 
-CRITICAL FORMATTING FOR SPEED AND SAFETY:
-1. To save generation time, ALWAYS output the JSON tool call minified on a SINGLE LINE.
-2. To completely avoid JSON format escaping issues, NEVER pass raw file data directly inside the JSON block. Instead, include the specialized `<payload>` tag extension INSIDE the tool call, right after your JSON container.
+CRITICAL RULES:
+1. NEVER output raw file data inside the JSON block. Always use the `<payload>` tag extension.
+2. ONLY output ONE tool call at a time.
+3. Never summarize or converse unless the task is completely finished.
 
-Example of the required high-speed, payload-safe format:
-<tool_call>{"name": "write_file", "args": {"filepath": "target.py"}}
+FORMAT:
+<tool_call>{"name": "write_file", "args": {"filepath": "target.py"}}</tool_call>
 <payload>
-def sample_function():
-    print("This content is completely unescaped and literal!")
+def example():
     return True
-</payload></tool_call>
-
-CRITICAL RULE: Never repeat, summarize, or print the contents of a file in your standard conversational response...
-
-Output exactly ONE tool call at a time wrapped in <tool_call> tags. Wait for tool execution results before outputting more code."""
+</payload>"""
 
 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 session_cwd = os.getcwd()
@@ -259,23 +227,17 @@ while True:
             line = input()
         except EOFError:
             break
-
-        if line.strip() == "/send":
-            break
-        if line.strip() == "/quit":
-            print("Exiting. Goodbye!")
-            sys.exit(0)
+        if line.strip() == "/send": break
+        if line.strip() == "/quit": sys.exit(0)
         if line.strip() == "/clear":
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             session_cwd = os.getcwd()
             print("🧹 Memory cleared!")
             continue
-
         user_lines.append(line)
 
     user_input = "\n".join(user_lines).strip()
-    if not user_input:
-        continue
+    if not user_input: continue
 
     # --- MACRO: /requirements ---
     if user_input.startswith("/requirements"):
@@ -283,24 +245,17 @@ while True:
         target_dir = parts[1].strip() if len(parts) > 1 else "."
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
         session_cwd = abs_target_dir
-
         if not os.path.isdir(abs_target_dir):
             print(f"❌ Error: Target directory '{abs_target_dir}' does not exist.")
             continue
-
         print(f"\n⚠️  MANUAL OVERRIDE: Generate requirements.txt natively?")
-        approval = input("Allow this action? (y/n): ").strip().lower()
-
-        if approval == 'y':
+        if input("Allow this action? (y/n): ").strip().lower() == 'y':
             tool_result = generate_requirements_native(abs_target_dir)
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",
-                 "content": f"System Alert: User manually ran /requirements for '{abs_target_dir}'. Result: {tool_result}. Briefly acknowledge completion."}
-            ]
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user",
+                                                                       "content": f"System Alert: User natively generated requirements for '{abs_target_dir}'. Result: {tool_result}. Acknowledge completion."}]
         else:
             print("🛑 Action blocked.")
-            continue
+        continue
 
     # --- MACRO: /readme ---
     elif user_input.startswith("/readme"):
@@ -315,42 +270,17 @@ while True:
 
         print(f"\n🔍 Pre-computing repository structure for {abs_target_dir}...")
         repo_tree = get_repo_structure(abs_target_dir)
-
         readme_path = os.path.join(abs_target_dir, "README.md")
 
         if os.path.exists(readme_path):
             existing_readme = read_file(readme_path, start_line=1, max_lines=1000)
-            print("   [Notice] Existing README.md found. Forcing structural analysis.")
-            strategy_steps = (
-                f"1. ANALYSIS PHASE: Begin your response with a bulleted list comparing the files mentioned in the Existing README against the Current Repository Structure.\n"
-                f"2. UPDATE PHASE: If discrepancies exist, execute ONE `patch_file` or `write_file` tool call to fix the README.\n"
-                f"3. COMPLETION (CRITICAL): Once your tool call executes successfully, or if no updates are needed, your task is complete. Output a short text confirmation and DO NOT invoke any further tools."
-            )
+            strategy_steps = "1. Compare Existing README vs Repo Structure.\n2. Use `write_file` to completely rewrite and update the README.\n3. State completion."
         else:
-            existing_readme = "No existing README.md found. Create from scratch."
-            print("   [Notice] No README.md found. Agent will draft a new one focusing on project concept.")
-            strategy_steps = (
-                f"1. Evaluate the repository structure below to infer the overall concept of the project.\n"
-                f"2. Use `write_file` along with the `<payload>` block to initialize the README file from scratch.\n"
-                f"3. Focus on functional purpose and setup. Exclude trivial boilerplate.\n"
-                f"4. COMPLETION (CRITICAL): After the file is written, output a final conversational message announcing completion and DO NOT invoke any further tools."
-            )
+            existing_readme = "No existing README.md found."
+            strategy_steps = "1. Evaluate repo structure.\n2. Use `write_file` to create the README from scratch.\n3. State completion."
 
-        hidden_prompt = (
-            f"The user wants to evaluate and maintain a clean, high-quality documentation README file.\n\n"
-            f"--- CONTEXT ---\n"
-            f"Target Directory: '{abs_target_dir}'\n"
-            f"Target File: README.md (Use exactly this relative filename in your tool calls)\n\n"
-            f"--- CURRENT REPOSITORY STRUCTURE ---\n{repo_tree}\n--------------------------\n\n"
-            f"--- ENTIRE EXISTING README CONTENT ---\n{existing_readme}\n--------------------------\n\n"
-            f"STRATEGY:\n{strategy_steps}\n\n"
-            f"CRITICAL: Do not call tools with empty arguments or empty payloads."
-        )
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": hidden_prompt}
-        ]
+        hidden_prompt = f"--- CONTEXT ---\nTarget: README.md\n\n--- REPO STRUCTURE ---\n{repo_tree}\n\n--- CURRENT README ---\n{existing_readme}\n\nSTRATEGY:\n{strategy_steps}"
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": hidden_prompt}]
 
     else:
         messages.append({"role": "user", "content": user_input})
@@ -361,47 +291,28 @@ while True:
         response_content = ""
 
         try:
-            stream = llm.create_chat_completion(
-                messages=messages, stream=True, temperature=0.1, stop=["</tool_call>"]
-            )
-
+            stream = llm.create_chat_completion(messages=messages, stream=True, temperature=0.1, stop=["</tool_call>"])
             finish_reason = None
             for chunk in stream:
                 choice = chunk['choices'][0]
-                if choice.get('finish_reason'):
-                    finish_reason = choice['finish_reason']
-
-                delta = choice.get('delta')
-                if 'content' in delta:
-                    piece = delta['content']
+                if choice.get('finish_reason'): finish_reason = choice['finish_reason']
+                if 'content' in choice.get('delta', {}):
+                    piece = choice['delta']['content']
                     print(piece, end="", flush=True)
                     response_content += piece
-
-            is_truncated = (finish_reason == "length")
 
             if "<tool_call>" in response_content and "</tool_call>" not in response_content:
                 response_content += "</tool_call>"
                 print("</tool_call>", end="", flush=True)
-
             print()
             messages.append({"role": "assistant", "content": response_content})
 
-            # Extract tool arguments
             tool_json_str = None
             tool_match = re.search(r"<tool_call>(.*?)</tool_call>", response_content, re.DOTALL)
-            if tool_match:
-                tool_json_str = tool_match.group(1).strip()
-            else:
-                md_match = re.search(r"```json\s*\n(.*?)\n```", response_content, re.DOTALL)
-                if md_match:
-                    tool_json_str = md_match.group(1).strip()
+            if tool_match: tool_json_str = tool_match.group(1).strip()
 
             if tool_json_str:
                 try:
-                    if is_truncated and "write_file" in response_content:
-                        raise json.JSONDecodeError("Incomplete payload due to context limit truncation.", tool_json_str,
-                                                   0)
-
                     tool_request = parse_robust_tool_call(response_content, tool_json_str)
                     tool_name = tool_request.get("name")
                     tool_args = tool_request.get("args", {})
@@ -409,79 +320,58 @@ while True:
                     if "filepath" in tool_args and not os.path.isabs(tool_args["filepath"]):
                         tool_args["filepath"] = os.path.abspath(os.path.join(session_cwd, tool_args["filepath"]))
 
-                    # Hard Interceptor for Empty Payloads on write/append mutations
-                    if tool_name in ["write_file", "append_file"]:
-                        content = tool_args.get('content', '')
-                        if not content.strip():
-                            print(f"🛑 [Parser Interceptor] Blocked an empty {tool_name} operation.")
-                            messages.append({
-                                "role": "user",
-                                "content": f"System Alert: You attempted to call {tool_name} with an empty payload. If you have no changes to make, do NOT call a tool. Announce completion instead."
-                            })
-                            continue
+                    # Interceptor for Empty Payloads
+                    if tool_name in ["write_file", "append_file"] and not tool_args.get('content', '').strip():
+                        print(f"🛑 [Parser] Blocked empty {tool_name}.")
+                        messages.append({"role": "user",
+                                         "content": "System Alert: Empty payload. Stop calling tools if task is done."})
+                        continue
 
-                    print(f"\n⚠️  AGENT REQUESTS PERMISSION TO EXECUTE: {tool_name}")
-                    if tool_name in ["write_file", "append_file"]:
-                        print(f"Resolved Target File: {tool_args.get('filepath')}")
-                        print("Content Snippet: \n" + "-" * 20)
-                        print(tool_args.get('content', '')[:300] + "\n...[truncated snippet]\n" + "-" * 20)
-                    elif tool_name == "patch_file":
-                        print(f"Patching File: {tool_args.get('filepath')}")
-                        print(f"Targeting Code block:\n--->\n{tool_args.get('search_text')}\n<---")
-                        print(f"Replacing With:\n--->\n{tool_args.get('replace_text')}\n<---")
-                    else:
-                        print(f"Arguments: {tool_args}")
-
+                    print(f"\n⚠️  AGENT REQUESTS TO EXECUTE: {tool_name}")
                     approval = input("Allow this action? (y/n/edit): ").strip().lower()
-
-                    tool_result = ""
-                    tool_reinforcement = ""
 
                     if approval == 'y':
                         if tool_name == "read_file":
-                            s_line = tool_args.get("start_line", 1)
-                            m_lines = tool_args.get("max_lines", 75)
-                            tool_result = read_file(tool_args.get("filepath"), start_line=s_line, max_lines=m_lines)
+                            tool_result = read_file(tool_args.get("filepath"),
+                                                    start_line=tool_args.get("start_line", 1),
+                                                    max_lines=tool_args.get("max_lines", 75))
+                            tool_reinforcement = ""
                         elif tool_name == "write_file":
                             tool_result = write_file(tool_args.get("filepath"), tool_args.get("content"))
-                            tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output the file's contents. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+
+                            # Native Python Linter Check
+                            syntax_err = check_python_syntax(tool_args.get("filepath"))
+                            if syntax_err:
+                                print(f"🐛 [Linter] Syntax Error Caught!")
+                                tool_result += f"\n\nCRITICAL LINTING ERROR:\n{syntax_err}\nYou must fix this syntax error using write_file."
+                                tool_reinforcement = ""
+                            else:
+                                tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output the file's contents. If done, state 'Task Complete' and stop.)"
+
                         elif tool_name == "append_file":
                             tool_result = append_file(tool_args.get("filepath"), tool_args.get("content"))
-                            tool_reinforcement = "\n\n(System Rule: Append successful. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
-                        elif tool_name == "patch_file":
-                            tool_result = patch_file(tool_args.get("filepath"), tool_args.get("search_text"),
-                                                     tool_args.get("replace_text"))
-                            tool_reinforcement = "\n\n(System Rule: Patch successful. Do not summarize. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+                            tool_reinforcement = "\n\n(System Rule: Append successful. If done, state 'Task Complete' and stop.)"
                         elif tool_name == "run_cmd":
                             tool_result = run_cmd(tool_args.get("command"))
-                        else:
-                            tool_result = "Error: Unknown tool."
+                            tool_reinforcement = ""
                         print(f"⚙️  Tool execution finished.")
 
                     elif approval == 'edit':
-                        feedback = input("Provide feedback or correction to the agent: ")
-                        tool_result = f"User denied the action and provided this feedback: {feedback}"
+                        tool_result = f"User feedback: {input('Provide feedback: ')}"
+                        tool_reinforcement = ""
                     else:
-                        tool_result = "User denied permission to execute this tool."
-                        print("🛑 Action blocked by user.")
+                        tool_result = "Action blocked by user."
+                        tool_reinforcement = ""
 
-                    messages.append(
-                        {"role": "user", "content": f"Tool Execution Result:\n{tool_result}{tool_reinforcement}"})
+                    messages.append({"role": "user", "content": f"Tool Result:\n{tool_result}{tool_reinforcement}"})
                     continue
 
                 except json.JSONDecodeError as e:
-                    error_msg = (
-                        f"Formatting Failure: {str(e)}\n"
-                        "Your block string parsing crashed. Remember to output using the minified raw tag:\n"
-                        "<tool_call>{\"name\": \"write_file\", \"args\": {\"filepath\": \"target_file.md\"}}</tool_call>\n"
-                        "<payload>\nRAW UNESCAPED CONTENT HERE\n</payload>"
-                    )
-                    print(f"\n❌ [Parser Interceptor] Halted a syntax loop. Returning loop control to user.")
-                    messages.append({"role": "user", "content": error_msg})
+                    print(f"\n❌ [Parser] Syntax error caught.")
+                    messages.append(
+                        {"role": "user", "content": f"Formatting Failure: {str(e)}\nOutput exactly as requested."})
                     break
-
             break
-
         except Exception as e:
-            print(f"\n[Error during generation]: {e}")
+            print(f"\n[Error]: {e}")
             break
