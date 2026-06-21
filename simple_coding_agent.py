@@ -7,12 +7,16 @@ import platform
 from llama_cpp import Llama
 
 from coding_agent.tool_definitions import read_file, write_file, append_file, patch_file, run_cmd
+from coding_agent.system_prompt_builder import build_system_prompt
+from coding_agent import hidden_readme_prompt_builder
 
 # 1. Configuration
 QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
 CONTEXT_WINDOW = 8192  # Ensure maximum headroom for analysis
 target_path = QWEN_PATH
 loaded_model_name = "Qwen 2.5 Coder 7B (Agent Mode V11 Payload-Safe)"
+
+ALLOW_PATCH = "--allow-patch" in sys.argv
 
 
 # --- HYPER-ROBUST PAYLOAD PARSER ---
@@ -39,7 +43,11 @@ def parse_robust_tool_call(response_content, tool_json_str):
         pass
 
     cleaned = json_clean.strip()
-    name_match = re.search(r'"name"\s*:\s*"(write_file|append_file|read_file|run_cmd|patch_file)"', cleaned)
+
+    # Dynamically allow patch_file parsing based on flag
+    allowed_tools = "write_file|append_file|read_file|run_cmd|patch_file" if ALLOW_PATCH else "write_file|append_file|read_file|run_cmd"
+    name_match = re.search(fr'"name"\s*:\s*"({allowed_tools})"', cleaned)
+
     if not name_match:
         raise json.JSONDecodeError("Could not isolate tool name signature from model string.", json_clean, 0)
 
@@ -212,35 +220,16 @@ else:
     print(f"❌ Error: Model file not found at {target_path}.")
     sys.exit(1)
 
-# 5. System Prompt
-# 5. System Prompt
-SYSTEM_PROMPT = """You are a local autonomous coding agent. Use tools modularly to solve tasks.
-
-AVAILABLE TOOLS:
-1. `read_file`: {"filepath": "<str>", "start_line": <int>, "max_lines": <int>}
-2. `write_file`: {"filepath": "<str>"}
-3. `append_file`: {"filepath": "<str>"}
-4. `patch_file`: Replaces exact first match of search_text. {"filepath": "<str>", "search_text": "<str>", "replace_text": "<str>"}
-5. `run_cmd`: {"command": "<str>"}
-
-CRITICAL RULES:
-1. Output EXACTLY ONE tool call per response wrapped in `<tool_call>` tags, then wait for results.
-2. The JSON tool call MUST be minified on a SINGLE LINE.
-3. NEVER pass raw file data inside JSON. ALWAYS put file content inside a `<payload>` tag immediately following the JSON.
-4. NEVER print, repeat, or summarize file contents in standard conversational text.
-
-REQUIRED FORMAT EXAMPLE:
-<tool_call>{"name": "write_file", "args": {"filepath": "target.py"}}
-<payload>
-def sample_function():
-    print("Literal, unescaped content goes here!")
-</payload></tool_call>"""
+# 5. System Prompt (Dynamically Built)
+SYSTEM_PROMPT = build_system_prompt(ALLOW_PATCH)
 
 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 session_cwd = os.getcwd()
 
 print("\n" + "=" * 60)
 print(f"🤖 Local Agent Initialized: [{loaded_model_name}]")
+if ALLOW_PATCH:
+    print("🔧 Patching Enabled (--allow-patch active)")
 print("Shortcuts:")
 print("  /requirements [path] -> Safely generates requirements.txt natively")
 print("  /readme [path]       -> Explores repo and builds a modular README.md")
@@ -318,35 +307,19 @@ while True:
         if os.path.exists(readme_path):
             existing_readme = read_file(readme_path, start_line=1, max_lines=1000)
             print("   [Notice] Existing README.md found. Forcing structural analysis.")
-            strategy_steps = (
-                f"1. ANALYSIS PHASE: Begin your response with a bulleted list comparing the files mentioned in the Existing README against the Current Repository Structure.\n"
-                f"2. UPDATE PHASE: If discrepancies exist, execute ONE `patch_file` or `write_file` tool call to fix the README.\n"
-                f"3. COMPLETION (CRITICAL): Once your tool call executes successfully, or if no updates are needed, your task is complete. Output a short text confirmation and DO NOT invoke any further tools."
-            )
         else:
             existing_readme = "No existing README.md found. Create from scratch."
             print("   [Notice] No README.md found. Agent will draft a new one focusing on project concept.")
-            strategy_steps = (
-                f"1. Evaluate the repository structure below to infer the overall concept of the project.\n"
-                f"2. Use `write_file` along with the `<payload>` block to initialize the README file from scratch.\n"
-                f"3. Focus on functional purpose and setup. Exclude trivial boilerplate.\n"
-                f"4. COMPLETION (CRITICAL): After the file is written, output a final conversational message announcing completion and DO NOT invoke any further tools."
-            )
 
-        hidden_prompt = (
-            f"The user wants to evaluate and maintain a clean, high-quality documentation README file.\n\n"
-            f"--- CONTEXT ---\n"
-            f"Target Directory: '{abs_target_dir}'\n"
-            f"Target File: README.md (Use exactly this relative filename in your tool calls)\n\n"
-            f"--- CURRENT REPOSITORY STRUCTURE ---\n{repo_tree}\n--------------------------\n\n"
-            f"--- ENTIRE EXISTING README CONTENT ---\n{existing_readme}\n--------------------------\n\n"
-            f"STRATEGY:\n{strategy_steps}\n\n"
-            f"CRITICAL: Do not call tools with empty arguments or empty payloads."
+        strategy_steps = hidden_readme_prompt_builder.build_strategy_steps(readme_path, ALLOW_PATCH)
+
+        hidden_readme_prompt = hidden_readme_prompt_builder.build_hidden_readme_prompt(
+            abs_target_dir, repo_tree, existing_readme, strategy_steps
         )
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": hidden_prompt}
+            {"role": "user", "content": hidden_readme_prompt}
         ]
 
     else:
