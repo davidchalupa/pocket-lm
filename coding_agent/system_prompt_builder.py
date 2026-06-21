@@ -1,9 +1,7 @@
-
 def build_system_prompt(allow_patch=False):
     """
     Builds and returns a system prompt for a language model.
     """
-    # 5. System Prompt (Dynamically Built)
     tools_section = (
         '4. `patch_file`: {"filepath": "<str>", "search_text": "<str>", "replace_text": "<str>"}\n5. `run_cmd`: {"command": "<str>"}'
         if allow_patch else
@@ -16,19 +14,19 @@ def build_system_prompt(allow_patch=False):
 
     AVAILABLE TOOLS:
     1. `read_file`: {{"filepath": "<str>", "start_line": <int>, "max_lines": <int>}}
-    2. `write_file`: {{"filepath": "<str>"}} - Overwrites or initializes a file completely with new contents.
-    3. `append_file`: {{"filepath": "<str>"}}
+    2. `write_file`: {{"filepath": "<str>"}} - Overwrites or initializes a file completely. REQUIRES a <payload> block immediately after closing the tool call.
+    3. `append_file`: {{"filepath": "<str>"}} - Appends code structures. REQUIRES a <payload> block immediately after closing the tool call.
     {tools_section}
 
     CRITICAL RULES:
     1. Output EXACTLY ONE tool call per response wrapped in `<tool_call>` tags, then wait for results.
     2. The JSON tool call MUST be minified on a SINGLE LINE.
-    3. NEVER pass raw file data inside JSON. ALWAYS put file content inside a `<payload>` tag immediately following the JSON.
+    3. NEVER pass raw file data inside JSON. ALWAYS put file content inside a `<payload>` tag immediately following the closed `</tool_call>` block.
     4. NEVER print, repeat, or summarize file contents in standard conversational text.{rule_5}
 
     REQUIRED FORMAT EXAMPLE:
-    <tool_call>{{"name": "write_file", "args": {{"filepath": "target.py"}}}}
+    <tool_call>{{"name": "write_file", "args": {{"filepath": "target.py"}}}}</tool_call>
     <payload>
     def sample_function():
         print("Literal, unescaped content goes here!")
-    </payload></tool_call>"""
+    </payload>"""

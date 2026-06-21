@@ -21,10 +21,17 @@ ALLOW_PATCH = "--allow-patch" in sys.argv
 
 # --- HYPER-ROBUST PAYLOAD PARSER ---
 def parse_robust_tool_call(response_content, tool_json_str):
-    payload_match = re.search(r"<payload>(.*?)</payload>", response_content, re.DOTALL)
-    raw_payload = payload_match.group(1) if payload_match else None
+    # FIX: Make the closing </payload> tag optional, or capture up to the end of the string
+    payload_match = re.search(r"<payload>(.*?)(?:</payload>|$)", response_content, re.DOTALL)
+    raw_payload = payload_match.group(1).strip() if payload_match else None
 
-    json_clean = re.sub(r"<payload>.*?</payload>", "", tool_json_str, flags=re.DOTALL).strip()
+    # Fallback: If no <payload> tags but there is a markdown code block after the tool call
+    if not raw_payload:
+        md_block_match = re.search(r"```[a-zA-Z]*\n(.*?)\n```", response_content.split("</tool_call>")[-1], re.DOTALL)
+        if md_block_match:
+            raw_payload = md_block_match.group(1)
+
+    json_clean = re.sub(r"<payload>.*?(?:</payload>|$)", "", tool_json_str, flags=re.DOTALL).strip()
 
     try:
         data = json.loads(json_clean, strict=False)
@@ -332,7 +339,9 @@ while True:
 
         try:
             stream = llm.create_chat_completion(
-                messages=messages, stream=True, temperature=0.1, stop=["</tool_call>"]
+                messages=messages, stream=True, temperature=0.1,
+                # this seems to cause problems when executing append instructions
+                # stop=["</tool_call>"],
             )
 
             finish_reason = None
