@@ -391,6 +391,20 @@ while True:
                     # Hard Interceptor for Empty Payloads on write/append mutations
                     if tool_name in ["write_file", "append_file"]:
                         content = tool_args.get('content', '')
+
+                        # Strip out empty markdown blocks that bypass a standard .strip()
+                        clean_content = re.sub(r'```[a-zA-Z]*\s*```', '', content).strip()
+
+                        if not clean_content:
+                            print(f"🛑 [Parser Interceptor] Blocked an empty {tool_name} operation.")
+                            messages.append({
+                                "role": "user",
+                                "content": f"System Alert: You attempted to call {tool_name} with an empty payload. If you have no changes to make or the task is complete, DO NOT output a <tool_call>. Announce completion in plain text instead."
+                            })
+                            continue
+                    # Hard Interceptor for Empty Payloads on write/append mutations
+                    if tool_name in ["write_file", "append_file"]:
+                        content = tool_args.get('content', '')
                         if not content.strip():
                             print(f"🛑 [Parser Interceptor] Blocked an empty {tool_name} operation.")
                             messages.append({

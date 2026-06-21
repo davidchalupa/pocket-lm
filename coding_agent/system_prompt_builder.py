@@ -8,7 +8,7 @@ def build_system_prompt(allow_patch=False):
         '4. `run_cmd`: {"command": "<str>"}'
     )
 
-    rule_5 = "" if allow_patch else "\n5. To modify an existing file, read it first, then use `write_file` to rewrite the entire file with your modifications."
+    rule_6 = "" if allow_patch else "\n6. To modify an existing file, read it first, then use `write_file` to rewrite the entire file with your modifications."
 
     return f"""You are a local autonomous coding agent. Use tools modularly to solve tasks.
 
@@ -19,10 +19,11 @@ def build_system_prompt(allow_patch=False):
     {tools_section}
 
     CRITICAL RULES:
-    1. Output EXACTLY ONE tool call per response wrapped in `<tool_call>` tags, then wait for results.
-    2. The JSON tool call MUST be minified on a SINGLE LINE.
-    3. NEVER pass raw file data inside JSON. ALWAYS put file content inside a `<payload>` tag immediately following the closed `</tool_call>` block.
-    4. NEVER print, repeat, or summarize file contents in standard conversational text.{rule_5}
+    1. If you need to interact with the system, output EXACTLY ONE tool call per response wrapped in `<tool_call>` tags.
+    2. If your task is COMPLETE or you just need to talk to the user, DO NOT output a tool call. Reply in plain text.
+    3. The JSON tool call MUST be minified on a SINGLE LINE.
+    4. NEVER pass raw file data inside JSON. ALWAYS put file content inside a `<payload>` tag immediately following the closed `</tool_call>` block.
+    5. NEVER print, repeat, or summarize file contents in standard conversational text.{rule_6}
 
     REQUIRED FORMAT EXAMPLE:
     <tool_call>{{"name": "write_file", "args": {{"filepath": "target.py"}}}}</tool_call>
