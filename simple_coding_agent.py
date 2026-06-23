@@ -238,8 +238,8 @@ print(f"🤖 Local Agent Initialized: [{loaded_model_name}]")
 if ALLOW_PATCH:
     print("🔧 Patching Enabled (--allow-patch active)")
 print("Shortcuts:")
-print("  /requirements [path] -> Safely generates requirements.txt natively")
-print("  /readme [path]       -> Explores repo and builds a modular README.md")
+print("  /requirements [path]       -> Safely generates requirements.txt natively")
+print("  /readme [--conceptual] [p] -> Explores repo and builds a modular README.md")
 print("Commands: Type /send to submit, /quit to exit, /clear to wipe memory.")
 print("=" * 60)
 
@@ -297,8 +297,13 @@ while True:
 
     # --- MACRO: /readme ---
     elif user_input.startswith("/readme"):
-        parts = user_input.split(" ", 1)
-        target_dir = parts[1].strip() if len(parts) > 1 else "."
+        # Detect structural strategy configuration flag
+        conceptual_focus = "--conceptual" in user_input or "-c" in user_input
+
+        # Strip out flags to leave only the raw argument content path
+        cleaned_args = user_input.replace("--conceptual", "").replace("-c", "").split(" ", 1)
+        target_dir = cleaned_args[1].strip() if len(cleaned_args) > 1 and cleaned_args[1].strip() else "."
+
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
         session_cwd = abs_target_dir
 
@@ -307,8 +312,8 @@ while True:
             continue
 
         print(f"\n🔍 Pre-computing repository structure for {abs_target_dir}...")
-        repo_tree = get_repo_structure(abs_target_dir)
 
+        repo_tree = get_repo_structure(abs_target_dir)
         readme_path = os.path.join(abs_target_dir, "README.md")
 
         if os.path.exists(readme_path):
@@ -316,9 +321,15 @@ while True:
             print("   [Notice] Existing README.md found. Forcing structural analysis.")
         else:
             existing_readme = "No existing README.md found. Create from scratch."
-            print("   [Notice] No README.md found. Agent will draft a new one focusing on project concept.")
+            print("   [Notice] No README.md found. Agent will draft a new one.")
 
-        strategy_steps = hidden_readme_prompt_builder.build_strategy_steps(readme_path, ALLOW_PATCH)
+        if conceptual_focus:
+            print("🧠 [Mode Change] Conceptual Focus: Focusing on project concept.")
+
+        # Updated signature to forward the custom mode configuration straight down
+        strategy_steps = hidden_readme_prompt_builder.build_strategy_steps(
+            readme_path, ALLOW_PATCH, conceptual_focus=conceptual_focus
+        )
 
         hidden_readme_prompt = hidden_readme_prompt_builder.build_hidden_readme_prompt(
             abs_target_dir, repo_tree, existing_readme, strategy_steps
