@@ -69,7 +69,17 @@ def parse_robust_tool_call(response_content, tool_json_str):
         if raw_payload is not None:
             args["content"] = raw_payload
         else:
-            content_match = re.search(r'"content"\s*:\s*验证"', cleaned) or re.search(r'"content"\s*:\s*"', cleaned)
+            # --- GUARDRAIL INTERCEPTOR ---
+            # If there's no payload block, and the model output looks like JSON,
+            # it means the model completely forgot to write the code payload.
+            if '"name"' in cleaned or '"args"' in cleaned:
+                raise json.JSONDecodeError(
+                    "CRITICAL: You forgot to provide the raw file data! "
+                    "You must include a separate <payload> block containing the actual code.",
+                    cleaned, 0
+                )
+
+            content_match = re.search(r'"content"\s*:\s*"', cleaned)
             if content_match:
                 start_idx = content_match.end()
                 end_match = re.search(r'"\s*\}\s*\}\s*$', cleaned) or re.search(r'"\s*\}\s*$', cleaned)
@@ -447,11 +457,22 @@ while True:
                             m_lines = tool_args.get("max_lines", 75)
                             tool_result = read_file(tool_args.get("filepath"), start_line=s_line, max_lines=m_lines)
                         elif tool_name == "write_file":
-                            tool_result = write_file(tool_args.get("filepath"), tool_args.get("content"))
+                            # Clean out stray markdown code block fences wrapped around the payload
+                            content = tool_args.get("content", "")
+                            content = re.sub(r"^```[a-zA-Z]*\n", "", content)  # Strips leading ```python
+                            content = re.sub(r"\n```$", "", content)  # Strips trailing ```
+
+                            tool_result = write_file(tool_args.get("filepath"), content)
                             tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output the file's contents. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
                         elif tool_name == "append_file":
-                            tool_result = append_file(tool_args.get("filepath"), tool_args.get("content"))
+                            # Clean out stray markdown code block fences wrapped around the payload
+                            content = tool_args.get("content", "")
+                            content = re.sub(r"^```[a-zA-Z]*\n", "", content)
+                            content = re.sub(r"\n```$", "", content)
+
+                            tool_result = append_file(tool_args.get("filepath"), content)
                             tool_reinforcement = "\n\n(System Rule: Append successful. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+
                         elif tool_name == "patch_file":
                             tool_result = patch_file(tool_args.get("filepath"), tool_args.get("search_text"),
                                                      tool_args.get("replace_text"))
