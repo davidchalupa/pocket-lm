@@ -176,7 +176,7 @@ def get_repo_structure(startpath, max_depth=3):
 
 
 # --- NATIVE HANDLER: /requirements ---
-def generate_requirements_native(target_dir):
+def generate_requirements_native(target_dir, no_version=False):
     try:
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
         if not os.path.isdir(abs_target_dir):
@@ -213,6 +213,19 @@ def generate_requirements_native(target_dir):
         raw_packages = result.stdout.strip()
         if not raw_packages:
             raw_packages = "# No dependencies found. The virtual environment is empty."
+        elif no_version:
+            # Multiplatform native processing to strip out versions (@, ==, <=, etc) safely
+            processed_lines = []
+            for line in raw_packages.splitlines():
+                line_strip = line.strip()
+                if not line_strip or line_strip.startswith("#"):
+                    processed_lines.append(line_strip)
+                    continue
+                # Split at '==', '>=', '<=', or ' @ ' (editable installs)
+                pkg_name = re.split(r'==|>=|<=| @ ', line_strip)[0].strip()
+                if pkg_name:
+                    processed_lines.append(pkg_name)
+            raw_packages = "\n".join(processed_lines)
 
         with open(final_output_path, 'w', encoding='utf-8') as f:
             f.write(raw_packages + "\n")
@@ -248,8 +261,8 @@ print(f"🤖 Local Agent Initialized: [{loaded_model_name}]")
 if ALLOW_PATCH:
     print("🔧 Patching Enabled (--allow-patch active)")
 print("Shortcuts:")
-print("  /requirements [path]       -> Safely generates requirements.txt natively")
-print("  /readme [--conceptual] [p] -> Explores repo and builds a modular README.md")
+print("  /requirements [--no-version] [path] -> Safely generates requirements.txt natively")
+print("  /readme [--conceptual] [p]         -> Explores repo and builds a modular README.md")
 print("Commands: Type /send to submit, /quit to exit, /clear to wipe memory.")
 print("=" * 60)
 
@@ -282,8 +295,13 @@ while True:
 
     # --- MACRO: /requirements ---
     if user_input.startswith("/requirements"):
-        parts = user_input.split(" ", 1)
-        target_dir = parts[1].strip() if len(parts) > 1 else "."
+        no_version_flag = "--no-version" in user_input
+
+        # Isolate the remaining arguments
+        cleaned_input = user_input.replace("--no-version", "").strip()
+        parts = cleaned_input.split(" ", 1)
+        target_dir = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "."
+
         abs_target_dir = os.path.abspath(os.path.expanduser(target_dir))
         session_cwd = abs_target_dir
 
@@ -291,11 +309,11 @@ while True:
             print(f"❌ Error: Target directory '{abs_target_dir}' does not exist.")
             continue
 
-        print(f"\n⚠️  MANUAL OVERRIDE: Generate requirements.txt natively?")
+        print(f"\n⚠️  MANUAL OVERRIDE: Generate requirements.txt natively? (No versions: {no_version_flag})")
         approval = input("Allow this action? (y/n): ").strip().lower()
 
         if approval == 'y':
-            tool_result = generate_requirements_native(abs_target_dir)
+            tool_result = generate_requirements_native(abs_target_dir, no_version=no_version_flag)
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",
