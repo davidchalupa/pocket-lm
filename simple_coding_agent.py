@@ -4,6 +4,7 @@ import json
 import subprocess
 import re
 import platform
+import shutil
 from llama_cpp import Llama
 
 from coding_agent.tool_definitions import read_file, write_file, append_file, patch_file, run_cmd
@@ -22,11 +23,9 @@ ALLOW_PATCH = "--allow-patch" in sys.argv
 
 # --- HYPER-ROBUST PAYLOAD PARSER ---
 def parse_robust_tool_call(response_content, tool_json_str):
-    # FIX: Make the closing </payload> tag optional, or capture up to the end of the string
     payload_match = re.search(r"<payload>(.*?)(?:</payload>|$)", response_content, re.DOTALL)
     raw_payload = payload_match.group(1).strip() if payload_match else None
 
-    # Fallback: If no <payload> tags but there is a markdown code block after the tool call
     if not raw_payload:
         md_block_match = re.search(r"```[a-zA-Z]*\n(.*?)\n```", response_content.split("</tool_call>")[-1], re.DOTALL)
         if md_block_match:
@@ -51,9 +50,7 @@ def parse_robust_tool_call(response_content, tool_json_str):
         pass
 
     cleaned = json_clean.strip()
-
-    # Dynamically allow patch_file parsing based on flag
-    allowed_tools = "write_file|append_file|read_file|run_cmd|patch_file" if ALLOW_PATCH else "write_file|append_file|read_file|run_cmd"
+    allowed_tools = "write_file|append_file|read_file|run_cmd|patch_file|extract_code_blocks" if ALLOW_PATCH else "write_file|append_file|read_file|run_cmd|extract_code_blocks"
     name_match = re.search(fr'"name"\s*:\s*"({allowed_tools})"', cleaned)
 
     if not name_match:
@@ -70,9 +67,6 @@ def parse_robust_tool_call(response_content, tool_json_str):
         if raw_payload is not None:
             args["content"] = raw_payload
         else:
-            # --- GUARDRAIL INTERCEPTOR ---
-            # If there's no payload block, and the model output looks like JSON,
-            # it means the model completely forgot to write the code payload.
             if '"name"' in cleaned or '"args"' in cleaned:
                 raise json.JSONDecodeError(
                     "CRITICAL: You forgot to provide the raw file data! "
@@ -149,6 +143,14 @@ def parse_robust_tool_call(response_content, tool_json_str):
         if ml_match: args["max_lines"] = int(ml_match.group(1))
         return {"name": tool_name, "args": args}
 
+    elif tool_name == "extract_code_blocks":
+        # Because we're passing lists, standard JSON loading is safer here.
+        # Make sure your LLM outputs clean JSON for this tool call.
+        try:
+            return {"name": tool_name, "args": json.loads(cleaned).get("args", {})}
+        except json.JSONDecodeError:
+            raise json.JSONDecodeError("Failed to parse extract_code_blocks arguments.", cleaned, 0)
+
     raise json.JSONDecodeError("Fallback pattern parser extraction failed.", json_clean, 0)
 
 
@@ -215,14 +217,12 @@ def generate_requirements_native(target_dir, no_version=False):
         if not raw_packages:
             raw_packages = "# No dependencies found. The virtual environment is empty."
         elif no_version:
-            # Multiplatform native processing to strip out versions (@, ==, <=, etc) safely
             processed_lines = []
             for line in raw_packages.splitlines():
                 line_strip = line.strip()
                 if not line_strip or line_strip.startswith("#"):
                     processed_lines.append(line_strip)
                     continue
-                # Split at '==', '>=', '<=', or ' @ ' (editable installs)
                 pkg_name = re.split(r'==|>=|<=| @ ', line_strip)[0].strip()
                 if pkg_name:
                     processed_lines.append(pkg_name)
@@ -251,11 +251,15 @@ else:
     print(f"❌ Error: Model file not found at {target_path}.")
     sys.exit(1)
 
-# 5. System Prompt (Dynamically Built)
+# 5. System Prompt & State Tracking
 SYSTEM_PROMPT = build_system_prompt(ALLOW_PATCH)
-
 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 session_cwd = os.getcwd()
+
+# --- SANDBOX STATE TRACKING ---
+is_split_mode = False
+original_split_file = None
+sandbox_directory = None
 
 print("\n" + "=" * 60)
 print(f"🤖 Local Agent Initialized: [{loaded_model_name}]")
@@ -264,7 +268,7 @@ if ALLOW_PATCH:
 print("Shortcuts:")
 print("  /requirements [--no-version] [path] -> Safely generates requirements.txt natively")
 print("  /readme [--conceptual] [p]          -> Explores repo and builds a modular README.md")
-print("  /split [path]                       -> Provides a suggestion for breaking up a file logically")
+print("  /split [path]                       -> Provides a plan and boilerplate for splitting a file into smaller modules")
 print("Commands: Type /send to submit, /quit to exit, /clear to wipe memory.")
 print("=" * 60)
 
@@ -286,6 +290,9 @@ while True:
         if line.strip() == "/clear":
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             session_cwd = os.getcwd()
+            is_split_mode = False
+            original_split_file = None
+            sandbox_directory = None
             print("🧹 Memory cleared!")
             continue
 
@@ -298,8 +305,6 @@ while True:
     # --- MACRO: /requirements ---
     if user_input.startswith("/requirements"):
         no_version_flag = "--no-version" in user_input
-
-        # Isolate the remaining arguments
         cleaned_input = user_input.replace("--no-version", "").strip()
         parts = cleaned_input.split(" ", 1)
         target_dir = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "."
@@ -327,10 +332,7 @@ while True:
 
     # --- MACRO: /readme ---
     elif user_input.startswith("/readme"):
-        # Detect structural strategy configuration flag
         conceptual_focus = "--conceptual" in user_input or "-c" in user_input
-
-        # Strip out flags to leave only the raw argument content path
         cleaned_args = user_input.replace("--conceptual", "").replace("-c", "").split(" ", 1)
         target_dir = cleaned_args[1].strip() if len(cleaned_args) > 1 and cleaned_args[1].strip() else "."
 
@@ -356,7 +358,6 @@ while True:
         if conceptual_focus:
             print("🧠 [Mode Change] Conceptual Focus: Focusing on project concept.")
 
-        # Updated signature to forward the custom mode configuration straight down
         strategy_steps = hidden_readme_prompt_builder.build_strategy_steps(
             readme_path, ALLOW_PATCH, conceptual_focus=conceptual_focus
         )
@@ -385,18 +386,28 @@ while True:
             print(f"❌ Error: Target file '{abs_target_file}' does not exist.")
             continue
 
-        print(f"\n🔍 Parsing AST structure for {abs_target_file}...")
+        print(f"\n🔍 Initializing Sandbox and Parsing AST structure for {abs_target_file}...")
 
-        # Call our new tool to generate the structural prompt
+        # 1. Setup sandbox tracking
+        _, sandbox_directory = file_splitter.setup_refactor_sandbox(abs_target_file)
+        original_split_file = abs_target_file
+        is_split_mode = True
+
+        # 2. Divert agent's current working directory to the sandbox!
+        session_cwd = sandbox_directory
+
         split_prompt = file_splitter.build_split_prompt(abs_target_file, session_cwd)
 
-        # Inject it into the LLM's message history just like the readme macro
+        # Guide the initial turn to ONLY plan. Execution follows.
+        split_prompt += "\n\nFormat your plan now. Do not write file contents yet. Wait for confirmation."
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": split_prompt}
         ]
 
     else:
+        # Standard execution or continuation of sandbox mode
         messages.append({"role": "user", "content": user_input})
 
     # Internal Agent Execution Loop
@@ -407,8 +418,6 @@ while True:
         try:
             stream = llm.create_chat_completion(
                 messages=messages, stream=True, temperature=0.1,
-                # this seems to cause problems when executing append instructions
-                # stop=["</tool_call>"],
             )
 
             finish_reason = None
@@ -431,6 +440,41 @@ while True:
 
             print()
             messages.append({"role": "assistant", "content": response_content})
+
+            # --- SYSTEM GUARDRAIL INTERCEPTOR FOR SANDBOX MODE ---
+            # Triggers when the agent confirms it has finished refactoring tasks
+            if is_split_mode and (
+                    "refactor phase complete" in response_content.lower() or "task complete" in response_content.lower()):
+                print("\n⚙️  [System Guardrail] Analyzing sandbox refactoring health...")
+                passed, report = file_splitter.verify_refactor_integrity(original_split_file, sandbox_directory)
+
+                if passed:
+                    print("✅ Sandbox passed structural integrity checks!")
+                    print(f"Files are safely staged in: {sandbox_directory}")
+                    approval = input("Would you like to promote these files to production? (y/n): ").strip().lower()
+
+                    if approval == 'y':
+                        target_dir = os.path.dirname(original_split_file)
+                        for item in os.listdir(sandbox_directory):
+                            src = os.path.join(sandbox_directory, item)
+                            dst = os.path.join(target_dir, item)
+                            if os.path.isfile(src) and not item.startswith('.'):
+                                shutil.copy2(src, dst)
+                        print("🚀 Files successfully promoted to production folder.")
+
+                    # Reset Mode
+                    is_split_mode = False
+                    session_cwd = os.path.dirname(original_split_file)
+                    break
+                else:
+                    print(f"❌ Verification Failed: {report}")
+                    # Feed the error straight back to the model as an automated user prompt
+                    messages.append({
+                        "role": "user",
+                        "content": f"System Verification Failed:\n{report}\nPlease use your tools to correct this error or locate missing logic blocks. When done, output 'Refactor Phase Complete'."
+                    })
+                    continue  # Force the agent loop to continue and fix its mistakes
+            # -----------------------------------------------------
 
             # Extract tool arguments
             tool_json_str = None
@@ -455,11 +499,8 @@ while True:
                     if "filepath" in tool_args and not os.path.isabs(tool_args["filepath"]):
                         tool_args["filepath"] = os.path.abspath(os.path.join(session_cwd, tool_args["filepath"]))
 
-                    # Hard Interceptor for Empty Payloads on write/append mutations
                     if tool_name in ["write_file", "append_file"]:
                         content = tool_args.get('content', '')
-
-                        # Strip out empty markdown blocks that bypass a standard .strip()
                         clean_content = re.sub(r'```[a-zA-Z]*\s*```', '', content).strip()
 
                         if not clean_content:
@@ -469,7 +510,7 @@ while True:
                                 "content": f"System Alert: You attempted to call {tool_name} with an empty payload. If you have no changes to make or the task is complete, DO NOT output a <tool_call>. Announce completion in plain text instead."
                             })
                             continue
-                    # Hard Interceptor for Empty Payloads on write/append mutations
+
                     if tool_name in ["write_file", "append_file"]:
                         content = tool_args.get('content', '')
                         if not content.strip():
@@ -503,26 +544,36 @@ while True:
                             m_lines = tool_args.get("max_lines", 75)
                             tool_result = read_file(tool_args.get("filepath"), start_line=s_line, max_lines=m_lines)
                         elif tool_name == "write_file":
-                            # Clean out stray markdown code block fences wrapped around the payload
                             content = tool_args.get("content", "")
-                            content = re.sub(r"^```[a-zA-Z]*\n", "", content)  # Strips leading ```python
-                            content = re.sub(r"\n```$", "", content)  # Strips trailing ```
+                            content = re.sub(r"^```[a-zA-Z]*\n", "", content)
+                            content = re.sub(r"\n```$", "", content)
 
                             tool_result = write_file(tool_args.get("filepath"), content)
-                            tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output the file's contents. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+                            # Custom rule depending on mode
+                            if is_split_mode:
+                                tool_reinforcement = "\n\n(System Rule: Write successful. Continue splitting code into files. If done, output 'Refactor Phase Complete'.)"
+                            else:
+                                tool_reinforcement = "\n\n(System Rule: Write successful. Do NOT output the file's contents. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+
                         elif tool_name == "append_file":
-                            # Clean out stray markdown code block fences wrapped around the payload
                             content = tool_args.get("content", "")
                             content = re.sub(r"^```[a-zA-Z]*\n", "", content)
                             content = re.sub(r"\n```$", "", content)
 
                             tool_result = append_file(tool_args.get("filepath"), content)
-                            tool_reinforcement = "\n\n(System Rule: Append successful. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+                            if is_split_mode:
+                                tool_reinforcement = "\n\n(System Rule: Append successful. Continue your task. If done, output 'Refactor Phase Complete'.)"
+                            else:
+                                tool_reinforcement = "\n\n(System Rule: Append successful. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
 
                         elif tool_name == "patch_file":
                             tool_result = patch_file(tool_args.get("filepath"), tool_args.get("search_text"),
                                                      tool_args.get("replace_text"))
-                            tool_reinforcement = "\n\n(System Rule: Patch successful. Do not summarize. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+                            if is_split_mode:
+                                tool_reinforcement = "\n\n(System Rule: Patch successful. Continue your task. If done, output 'Refactor Phase Complete'.)"
+                            else:
+                                tool_reinforcement = "\n\n(System Rule: Patch successful. Do not summarize. If your primary task is complete, state 'Task Complete' in plain text and STOP calling tools. Wait for the user.)"
+
                         elif tool_name == "run_cmd":
                             tool_result = run_cmd(tool_args.get("command"))
                         else:
@@ -550,7 +601,6 @@ while True:
                     print(f"\n❌ [Parser Interceptor] Halted a syntax loop. Returning loop control to user.")
                     messages.append({"role": "user", "content": error_msg})
                     break
-
             break
 
         except Exception as e:

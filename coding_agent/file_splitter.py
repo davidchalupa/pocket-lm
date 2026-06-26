@@ -1,5 +1,6 @@
 import ast
 import os
+import shutil
 
 
 def analyze_file_metrics(filepath):
@@ -67,7 +68,7 @@ def analyze_file_metrics(filepath):
 def build_split_prompt(filepath, target_dir):
     """
     Dynamically generates a token-efficient, framework-agnostic prompt
-    optimized for either God Classes or General Monoliths.
+    optimized for generating generic Boilerplate Skeletons.
     """
     filename = os.path.basename(filepath)
     analysis = analyze_file_metrics(filepath)
@@ -77,7 +78,6 @@ def build_split_prompt(filepath, target_dir):
 
     structure_map = analysis["structure_map"]
 
-    # Contextual adjustments based on AST diagnostics
     if analysis["is_god_class"]:
         context_framing = (
             f"The file `{filename}` contains an anti-pattern: a single giant 'God Class' "
@@ -86,7 +86,7 @@ def build_split_prompt(filepath, target_dir):
         architectural_guidance = (
             "- Isolate business logic, data calculations, or heavy processing routines away from core orchestration/UI layers.\n"
             "- Group highly related operations into clean specialized Services, Managers, or specialized sub-components.\n"
-            "- Extract secondary UI, operational workflows, or optional attributes into explicit Extension classes or Mixins."
+            "- Extract secondary presentation blocks, operational workflows, or optional attributes into explicit Extension classes or Mixins."
         )
     else:
         context_framing = (
@@ -98,7 +98,7 @@ def build_split_prompt(filepath, target_dir):
             "- Separate utility primitives, driver logic, or presentation targets into explicit horizontal tiers."
         )
 
-    # Token-optimized structural prompt
+    # Token-optimized structural prompt enforcing SKELETON mode using generic terms
     prompt = f"""You are a senior Software Architect. Your task is to design a refactoring split blueprint.
 
 [Context]
@@ -114,8 +114,90 @@ Layout Footprint:
 - Ensure that core entry execution setups or initialization points remain clearly in the root file.
 
 [Required Output Layout Format]
-1. EXPLANATION: Write out your structural design reasoning out loud first. Justify your module division choices.
-2. JSON PLAN: At the absolute end of your response, provide exactly one markdown ```json block containing a single valid JSON object mapping recommended filenames to lists of their respective target elements/methods.
+1. EXPLANATION: Write out your structural design reasoning out loud first. Justify your module division choices using generic domain terms.
+2. JSON PLAN: Provide exactly one markdown ```json block mapping recommended filenames to lists of their respective target methods.
+3. IMMEDIATE EXECUTION: You must immediately begin executing your plan. Use your `write_file` tool to create the FIRST file from your plan. 
+   - CRITICAL: Write ONLY the structural boilerplate skeleton. 
+   - You MUST use `pass` for every single method body to ensure perfectly valid Python syntax. 
+   - Do NOT attempt to write the actual implementation logic yet.
+   - You MUST use the strict XML tag format for your tool call.
+
+Example Tool Call Format:
+<tool_call>
+{{
+    "name": "write_file", 
+    "args": {{"filepath": "separate_logic_service.py"}}
+}}
+</tool_call>
+<payload>
+import sys
+
+class SubLogicService:
+    def process_data(self):
+        pass
+
+    def calculate_metrics(self):
+        pass
+</payload>
+
+Start executing the skeleton generation for the first file immediately after your JSON plan.
 """
 
     return prompt
+
+
+def setup_refactor_sandbox(source_filepath):
+    """
+    Copies the target file to a hidden sandbox directory to protect production code.
+    """
+    abs_source = os.path.abspath(source_filepath)
+    base_dir = os.path.dirname(abs_source)
+    sandbox_dir = os.path.join(base_dir, ".refactor_sandbox")
+
+    if os.path.exists(sandbox_dir):
+        shutil.rmtree(sandbox_dir)  # Clear previous attempts
+    os.makedirs(sandbox_dir, exist_ok=True)
+
+    sandbox_target = os.path.join(sandbox_dir, os.path.basename(abs_source))
+    shutil.copy2(abs_source, sandbox_target)
+
+    return sandbox_target, sandbox_dir
+
+
+def verify_refactor_integrity(original_filepath, generated_files_dir):
+    """
+    Defensive Guardrail: Compares the AST components of the original file
+    against all newly created files to ensure zero logic was lost or corrupted.
+    """
+    # 1. Gather all expected components from the original file
+    try:
+        with open(original_filepath, 'r', encoding='utf-8') as f:
+            orig_tree = ast.parse(f.read())
+    except Exception as e:
+        return False, f"Failed to parse original file AST: {e}"
+
+    original_methods = set()
+    for node in ast.walk(orig_tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            original_methods.add(node.name)
+
+    # 2. Gather all components from the new sandbox files
+    generated_methods = set()
+    for root, _, files in os.walk(generated_files_dir):
+        for file in files:
+            if file.endswith('.py') and not file.startswith('.'):
+                try:
+                    with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+                        tree = ast.parse(f.read())
+                    for node in ast.walk(tree):
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            generated_methods.add(node.name)
+                except SyntaxError as e:
+                    return False, f"Syntax Error in generated file '{file}': {e}"
+
+    # 3. Check for dropped logic
+    missing = original_methods - generated_methods
+    if missing:
+        return False, f"CRITICAL ERROR: The following functions/methods were lost during refactoring: {missing}"
+
+    return True, "Integrity check passed. All components accounted for and syntactically valid."

@@ -1,5 +1,6 @@
 import os
 import subprocess
+import ast
 
 
 # 2. Tool Definitions
@@ -86,3 +87,49 @@ def run_cmd(command):
     except Exception as e:
         return f"Error executing command: {e}"
 
+
+def extract_code_blocks(source_filepath, target_filepath, block_names, wrap_in_class=None):
+    """
+    Deterministically extracts exact source code blocks from the source file
+    and writes them to the target file.
+    """
+    try:
+        with open(source_filepath, 'r', encoding='utf-8') as f:
+            source = f.read()
+
+        tree = ast.parse(source)
+        extracted_code = []
+
+        # If the LLM wants these methods grouped in a new class
+        if wrap_in_class:
+            extracted_code.append(f"class {wrap_in_class}:")
+            indent_prefix = "    "
+        else:
+            indent_prefix = ""
+
+        found_blocks = 0
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name in block_names:
+                    segment = ast.get_source_segment(source, node)
+                    if segment:
+                        # Fix indentation if we are wrapping top-level methods into a new class
+                        if wrap_in_class and not isinstance(node, ast.ClassDef):
+                            segment = "\n".join(indent_prefix + line if line.strip() else line
+                                                for line in segment.splitlines())
+
+                        extracted_code.append(segment)
+                        found_blocks += 1
+
+        if found_blocks == 0:
+            return f"Error: None of the requested blocks ({block_names}) were found in the source file."
+
+        # Write the exact code securely to the sandbox
+        os.makedirs(os.path.dirname(target_filepath), exist_ok=True)
+        with open(target_filepath, 'a', encoding='utf-8') as f:
+            f.write("\n\n".join(extracted_code) + "\n\n")
+
+        return f"Success: Extracted {found_blocks} blocks and appended to {os.path.basename(target_filepath)}"
+
+    except Exception as e:
+        return f"Extraction Error: {e}"
