@@ -9,6 +9,7 @@ from llama_cpp import Llama
 from coding_agent.tool_definitions import read_file, write_file, append_file, patch_file, run_cmd
 from coding_agent.system_prompt_builder import build_system_prompt
 from coding_agent import hidden_readme_prompt_builder
+from coding_agent import file_splitter
 
 # 1. Configuration
 QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
@@ -262,7 +263,8 @@ if ALLOW_PATCH:
     print("🔧 Patching Enabled (--allow-patch active)")
 print("Shortcuts:")
 print("  /requirements [--no-version] [path] -> Safely generates requirements.txt natively")
-print("  /readme [--conceptual] [p]         -> Explores repo and builds a modular README.md")
+print("  /readme [--conceptual] [p]          -> Explores repo and builds a modular README.md")
+print("  /split [path]                       -> Provides a suggestion for breaking up a file logically")
 print("Commands: Type /send to submit, /quit to exit, /clear to wipe memory.")
 print("=" * 60)
 
@@ -366,6 +368,32 @@ while True:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": hidden_readme_prompt}
+        ]
+
+    # --- MACRO: /split ---
+    elif user_input.startswith("/split"):
+        cleaned_args = user_input.split(" ", 1)
+
+        if len(cleaned_args) < 2 or not cleaned_args[1].strip():
+            print("❌ Error: You must provide a filepath. Usage: /split [filepath]")
+            continue
+
+        target_file = cleaned_args[1].strip()
+        abs_target_file = os.path.abspath(os.path.expanduser(target_file))
+
+        if not os.path.isfile(abs_target_file):
+            print(f"❌ Error: Target file '{abs_target_file}' does not exist.")
+            continue
+
+        print(f"\n🔍 Parsing AST structure for {abs_target_file}...")
+
+        # Call our new tool to generate the structural prompt
+        split_prompt = file_splitter.build_split_prompt(abs_target_file, session_cwd)
+
+        # Inject it into the LLM's message history just like the readme macro
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": split_prompt}
         ]
 
     else:
