@@ -65,10 +65,10 @@ def analyze_file_metrics(filepath):
         return {"error": f"Error reading file: {e}"}
 
 
-def build_split_prompt(filepath, target_dir):
+def build_split_prompt(filepath, target_dir, execute_mode=False):
     """
-    Dynamically generates a token-efficient, framework-agnostic prompt
-    optimized for generating generic Boilerplate Skeletons.
+    Dynamically generates a framework-agnostic prompt.
+    Guarantees exact original prompt matching for Advisor mode to prevent LLM regressions.
     """
     filename = os.path.basename(filepath)
     analysis = analyze_file_metrics(filepath)
@@ -98,8 +98,51 @@ def build_split_prompt(filepath, target_dir):
             "- Separate utility primitives, driver logic, or presentation targets into explicit horizontal tiers."
         )
 
-    # Token-optimized structural prompt enforcing SKELETON mode using generic terms
-    prompt = f"""You are a senior Software Architect. Your task is to design a refactoring split blueprint.
+    if execute_mode:
+        # --- NEW EXECUTION MODE PROMPT ---
+        prompt = f"""You are a senior Software Architect. Your task is to design a refactoring split blueprint.
+
+[Context]
+File Target: `{filename}`
+Layout Footprint:
+{context_framing}
+
+[AST Map Output]
+{structure_map}
+
+[Architectural Rules]
+{architectural_guidance}
+- Ensure that core entry execution setups or initialization points remain clearly in the root file.
+
+[Required Output Layout Format]
+1. EXPLANATION: Write out your structural design reasoning out loud first. Justify your module division choices using generic domain terms.
+2. JSON PLAN: Provide exactly one markdown ```json block mapping recommended filenames to lists of their respective target methods.
+3. IMMEDIATE EXECUTION: You must immediately begin executing your plan. Use your `write_file` tool to create the FIRST file from your plan. 
+   - CRITICAL: Write the FULL, working implementation for this new file.
+   - Migrate the actual operational logic from the original file into this new structure.
+   - Ensure all necessary imports for your extracted logic are included.
+   - You MUST use the strict XML tag format for your tool call.
+
+Example Tool Call Format:
+<tool_call>
+{{
+    "name": "write_file", 
+    "args": {{"filepath": "extracted_service.py"}}
+}}
+</tool_call>
+<payload>
+import json
+
+class DataCalculator:
+    def process_data(self, data):
+        return [d * 2 for d in data if d > 0]
+</payload>
+
+Start executing the logic migration for the first file immediately after your JSON plan.
+"""
+    else:
+        # --- VERBATIM ORIGINAL ADVISOR PROMPT (NO REGRESSIONS) ---
+        prompt = f"""You are a senior Software Architect. Your task is to design a refactoring split blueprint.
 
 [Context]
 File Target: `{filename}`

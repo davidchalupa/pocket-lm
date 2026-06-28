@@ -261,16 +261,25 @@ is_split_mode = False
 original_split_file = None
 sandbox_directory = None
 
-print("\n" + "=" * 60)
+print("\n" + "═" * 60)
 print(f"🤖 Local Agent Initialized: [{loaded_model_name}]")
 if ALLOW_PATCH:
-    print("🔧 Patching Enabled (--allow-patch active)")
-print("Shortcuts:")
-print("  /requirements [--no-version] [path] -> Safely generates requirements.txt natively")
-print("  /readme [--conceptual] [p]          -> Explores repo and builds a modular README.md")
-print("  /split [path]                       -> Provides a plan and boilerplate for splitting a file into smaller modules")
-print("Commands: Type /send to submit, /quit to exit, /clear to wipe memory.")
-print("=" * 60)
+    print("🔧 [STATUS] Patching Enabled")
+
+print("\n🚀 Available Modes & Macros:")
+print("  /requirements [--no-version] [path]")
+print("      -> Natively generate requirements.txt")
+print("\n  /readme [--conceptual] [path]")
+print("      -> AI-driven repo documentation")
+print("\n  /split [--execute] [filepath]")
+print("      -> Refactor monoliths (Advisor mode or Logic Extraction mode)")
+print("         [--execute] adds risk: agent will attempt full code refactoring")
+
+print("\n⌨️  Commands:")
+print("  /send  -> Submit your prompt")
+print("  /clear -> Wipe conversation memory & reset environment")
+print("  /quit  -> Terminate agent")
+print("═" * 60)
 
 # 6. Main Agent Loop
 while True:
@@ -373,10 +382,11 @@ while True:
 
     # --- MACRO: /split ---
     elif user_input.startswith("/split"):
-        cleaned_args = user_input.split(" ", 1)
+        execute_mode = "--execute" in user_input
+        cleaned_args = user_input.replace("--execute", "").strip().split(" ", 1)
 
         if len(cleaned_args) < 2 or not cleaned_args[1].strip():
-            print("❌ Error: You must provide a filepath. Usage: /split [filepath]")
+            print("❌ Error: You must provide a filepath. Usage: /split [--execute] [filepath]")
             continue
 
         target_file = cleaned_args[1].strip()
@@ -386,7 +396,13 @@ while True:
             print(f"❌ Error: Target file '{abs_target_file}' does not exist.")
             continue
 
-        print(f"\n🔍 Initializing Sandbox and Parsing AST structure for {abs_target_file}...")
+        if execute_mode:
+            print(
+                f"\n⚠️  [WARNING] Execution Mode Active: The agent will attempt to migrate the full implementation logic.")
+            print("   This is recommended ONLY for smaller files / simpler refactors.")
+            print(f"🔍 Initializing Sandbox and Parsing AST structure for {abs_target_file}...")
+        else:
+            print(f"\n🔍 Initializing Sandbox (Advisor Mode) for {abs_target_file}...")
 
         # 1. Setup sandbox tracking
         _, sandbox_directory = file_splitter.setup_refactor_sandbox(abs_target_file)
@@ -396,9 +412,9 @@ while True:
         # 2. Divert agent's current working directory to the sandbox!
         session_cwd = sandbox_directory
 
-        split_prompt = file_splitter.build_split_prompt(abs_target_file, session_cwd)
+        # Pass the flag to the prompt builder
+        split_prompt = file_splitter.build_split_prompt(abs_target_file, session_cwd, execute_mode=execute_mode)
 
-        # Guide the initial turn to ONLY plan. Execution follows.
         split_prompt += "\n\nFormat your plan now. Do not write file contents yet. Wait for confirmation."
 
         messages = [
