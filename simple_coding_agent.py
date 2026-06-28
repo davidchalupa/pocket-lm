@@ -35,6 +35,11 @@ def parse_robust_tool_call(response_content, tool_json_str):
 
     try:
         data = json.loads(json_clean, strict=False)
+        if "name" not in data or data.get("name") is None:
+            raise json.JSONDecodeError(
+                "Parsed JSON has no 'name' field — likely matched the wrong block (e.g. JSON PLAN instead of tool call).",
+                json_clean, 0
+            )
         if "args" not in data:
             data["args"] = {}
 
@@ -498,9 +503,12 @@ while True:
             if tool_match:
                 tool_json_str = tool_match.group(1).strip()
             else:
-                md_match = re.search(r"```json\s*\n(.*?)\n```", response_content, re.DOTALL)
-                if md_match:
-                    tool_json_str = md_match.group(1).strip()
+                # search for a json block that actually contains "name", not just the first one
+                for md_match in re.finditer(r"```json\s*\n(.*?)\n```", response_content, re.DOTALL):
+                    candidate = md_match.group(1).strip()
+                    if '"name"' in candidate:
+                        tool_json_str = candidate
+                        break
 
             if tool_json_str:
                 try:
