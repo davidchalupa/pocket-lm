@@ -11,6 +11,7 @@ from coding_agent.tool_definitions import read_file, write_file, append_file, pa
 from coding_agent.system_prompt_builder import build_system_prompt
 from coding_agent import hidden_readme_prompt_builder
 from coding_agent import file_splitter
+from coding_agent import native_linter
 
 # 1. Configuration
 QWEN_PATH = "models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
@@ -467,10 +468,31 @@ while True:
             if is_split_mode and (
                     "refactor phase complete" in response_content.lower() or "task complete" in response_content.lower()):
                 print("\n⚙️  [System Guardrail] Analyzing sandbox refactoring health...")
+
+                # Step 1: Check structural integrity (Are all methods present?)
                 passed, report = file_splitter.verify_refactor_integrity(original_split_file, sandbox_directory)
 
+                # Step 2: Native Linter Check (Are all imports resolved?)
                 if passed:
-                    print("✅ Sandbox passed structural integrity checks!")
+                    for root, _, files in os.walk(sandbox_directory):
+                        for file in files:
+                            if file.endswith('.py') and not file.startswith('.'):
+                                filepath = os.path.join(root, file)
+                                linter_error = native_linter.check_python_syntax_and_imports(filepath)
+
+                                if linter_error:
+                                    passed = False
+                                    report = (
+                                        f"Dependency Error in '{file}':\n{linter_error}\n"
+                                        "Use your patch_file or write_file tool to add the missing imports at the top of the file."
+                                    )
+                                    break  # Fail fast: Stop checking after the first error
+                        if not passed:
+                            break
+
+                # Step 3: Resolution
+                if passed:
+                    print("✅ Sandbox passed structural AND dependency checks!")
                     print(f"Files are safely staged in: {sandbox_directory}")
                     approval = input("Would you like to promote these files to production? (y/n): ").strip().lower()
 
@@ -488,11 +510,11 @@ while True:
                     session_cwd = os.path.dirname(original_split_file)
                     break
                 else:
-                    print(f"❌ Verification Failed: {report}")
+                    print(f"❌ Verification Failed:\n{report}")
                     # Feed the error straight back to the model as an automated user prompt
                     messages.append({
                         "role": "user",
-                        "content": f"System Verification Failed:\n{report}\nPlease use your tools to correct this error or locate missing logic blocks. When done, output 'Refactor Phase Complete'."
+                        "content": f"System Verification Failed:\n{report}\n\nPlease use your tools to correct this error. When done, output 'Refactor Phase Complete'."
                     })
                     continue  # Force the agent loop to continue and fix its mistakes
             # -----------------------------------------------------
@@ -573,6 +595,13 @@ while True:
                             content = re.sub(r"\n```$", "", content)
 
                             tool_result = write_file(tool_args.get("filepath"), content)
+
+                            # --- UNIVERSAL LINTER GUARDRAIL ---
+                            linter_error = native_linter.check_python_syntax_and_imports(tool_args.get("filepath"))
+                            if linter_error:
+                                tool_result += f"\n\n⚠️ CRITICAL WARNING: The file was written, but the linter found an issue:\n{linter_error}\nPlease immediately fix this file by adding the missing imports or correcting the syntax."
+                            # ----------------------------------
+
                             # Custom rule depending on mode
                             if is_split_mode:
                                 tool_reinforcement = "\n\n(System Rule: Write successful. Continue splitting code into files. If done, output 'Refactor Phase Complete'.)"
