@@ -289,7 +289,7 @@ print("═" * 60)
 
 # 6. Main Agent Loop
 while True:
-    print("\n[You]:")
+    print("\n[You] (Type /send to submit, /cancel to scratch draft, /undo to delete last line):")
     user_lines = []
     while True:
         try:
@@ -297,18 +297,39 @@ while True:
         except EOFError:
             break
 
-        if line.strip() == "/send":
+        trimmed = line.strip()
+
+        if trimmed == "/send":
             break
-        if line.strip() == "/quit":
+        if trimmed == "/quit":
             print("Exiting. Goodbye!")
             sys.exit(0)
-        if line.strip() == "/clear":
+
+        # FIX: Wipes history AND current draft buffer completely
+        if trimmed == "/clear":
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             session_cwd = os.getcwd()
             is_split_mode = False
             original_split_file = None
             sandbox_directory = None
-            print("🧹 Memory cleared!")
+            user_lines = []
+            print("🧹 Memory and current draft completely cleared!")
+            break  # Breaks back to the main loop to display a fresh prompt
+
+        # NEW FEATURE: Scratches the current input draft without touching AI memory
+        if trimmed == "/cancel":
+            user_lines = []
+            print("❌ Current draft discarded. Start typing your new prompt below:")
+            break  # Breaks back to the main loop to refresh the prompt
+
+        # NEW FEATURE: Removes just the last line entered so you can fix typos
+        if trimmed == "/undo":
+            if user_lines:
+                removed = user_lines.pop()
+                print(f"🗑️  Removed line: \"{removed}\"")
+                print(f"Current buffer status ({len(user_lines)} lines active). Continue typing...")
+            else:
+                print("⚠️ Buffer is already empty.")
             continue
 
         user_lines.append(line)
